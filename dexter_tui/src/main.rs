@@ -388,7 +388,7 @@ fn ui(f: &mut Frame, app: &App) {
                         Line::from(""),
                         Line::from(vec![
                             Span::styled(" > ", Style::default().fg(AMBER_DIM)),
-                            Span::styled(cmd, Style::default().bg(AMBER).fg(CRT_BG).add_modifier(Modifier::BOLD)),
+                            Span::styled(cmd, Style::default().bg(AMBER).fg(CRT_BG)),
                         ]),
                     ]
                 )
@@ -443,7 +443,6 @@ fn ui(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled(" MODE: ", Style::default().fg(AMBER_DIM)),
             Span::styled(state_name, Style::default().fg(AMBER)),
-            Span::styled(" | LATENCY: 24ms | MEM: 12MB", Style::default().fg(AMBER_DIM)),
         ]),
         Line::from(Span::styled(" Press [ESC] to Abort/Quit ", Style::default().fg(Color::Black).bg(AMBER))),
     ];
@@ -565,7 +564,7 @@ fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<
                         ]));
                         lines.push(Line::from(vec![
                             Span::styled("  NEW: ", Style::default().fg(amber)),
-                            Span::styled(&diff.new, Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+                            Span::styled(&diff.new, Style::default().fg(amber)),
                         ]));
                         lines.push(Line::from(""));
                     }
@@ -588,7 +587,7 @@ fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<
 
 fn render_finished_view<'a>(output: &'a str, plugin_name: Option<&'a str>, amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
     let mut lines = vec![
-        Line::from(Span::styled("EXECUTION COMPLETE.", Style::default().fg(Color::Green))),
+        Line::from(Span::styled("EXECUTION COMPLETE.", Style::default().fg(amber).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled("Target System Output:", Style::default().fg(amber_dim))),
     ];
@@ -672,7 +671,7 @@ impl SetupApp {
              let client = dexter_core::LlmClient::new(
                  self.gemini_key.clone(),
                  "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                 "gemini-pro".to_string()
+                 "gemini-flash".to_string()
              );
              if let Ok(models) = client.list_models().await {
                  for m in models {
@@ -839,41 +838,41 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             Line::from(""),
             Line::from(Span::styled("WELCOME TO DEXTER", Style::default().fg(AMBER).add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from(Span::styled("Dexter requires access to advanced neural networks to function.", Style::default().fg(AMBER_DIM))),
-            Line::from("We will guide you through setting up your API keys."),
+            Line::from(Span::styled("Dexter Requires Access to Advanced Neural Networks to Function.", Style::default().fg(AMBER_DIM))),
+            Line::from("We Will Guide You Through Setting Up Your API Keys."),
             Line::from(""),
             Line::from(Span::styled("[PRESS ENTER TO BEGIN]", Style::default().fg(AMBER).add_modifier(Modifier::RAPID_BLINK))),
         ],
         SetupState::GeminiKey => vec![
             Line::from(Span::styled("STEP 1: GEMINI API KEY", Style::default().fg(AMBER))),
             Line::from(""),
-            Line::from("Enter your Google Gemini API Key:"),
+            Line::from("Enter Your Google Gemini API Key:"),
             Line::from(""),
             Line::from(vec![
                 Span::styled("> ", Style::default().fg(AMBER)),
                 Span::styled(if app.gemini_key.is_empty() { "_" } else { &app.gemini_key }, Style::default().fg(Color::White)),
             ]),
             Line::from(""),
-            Line::from(Span::styled("(Leave empty to skip)", Style::default().fg(AMBER_DIM))),
+            Line::from(Span::styled("(Press Enter to Leave Empty If You Only Have DeepSeek)", Style::default().fg(AMBER_DIM))),
         ],
         SetupState::DeepSeekKey => vec![
             Line::from(Span::styled("STEP 2: DEEPSEEK API KEY", Style::default().fg(AMBER))),
             Line::from(""),
-            Line::from("Enter your DeepSeek API Key:"),
+            Line::from("Enter Your DeepSeek API Key:"),
             Line::from(""),
             Line::from(vec![
                 Span::styled("> ", Style::default().fg(AMBER)),
                 Span::styled(if app.deepseek_key.is_empty() { "_" } else { &app.deepseek_key }, Style::default().fg(Color::White)),
             ]),
             Line::from(""),
-            Line::from(Span::styled("(Leave empty to skip if you set Gemini)", Style::default().fg(AMBER_DIM))),
+            Line::from(Span::styled("(Press Enter to Leave Empty to Skip If You Only Have Gemini)", Style::default().fg(AMBER_DIM))),
         ],
         SetupState::FetchingModels => vec![
             Line::from(""),
             Line::from(Span::styled("STEP 3: DISCOVERING MODELS", Style::default().fg(AMBER))),
             Line::from(""),
-            Line::from("Connecting to provider APIs..."),
-            Line::from("Fetching latest model list..."),
+            Line::from("Connecting to Provider APIs..."),
+            Line::from("Fetching Latest Model List..."),
             Line::from(""),
             Line::from(Span::styled("[PLEASE WAIT]", Style::default().fg(AMBER).add_modifier(Modifier::RAPID_BLINK))),
         ],
@@ -881,7 +880,7 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             let mut lines = vec![
                 Line::from(Span::styled("STEP 3: SELECT PRIMARY MODEL", Style::default().fg(AMBER))),
                 Line::from(""),
-                Line::from("Select the AI model to power Dexter:"),
+                Line::from("Select the AI Model to Power Dexter:"),
                 Line::from(""),
             ];
             
@@ -896,7 +895,7 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             }
             
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("(Use Arrow Keys to select, ENTER to confirm)", Style::default().fg(AMBER_DIM))));
+            lines.push(Line::from(Span::styled("(Use Arrow Keys to Select, ENTER to Confirm)", Style::default().fg(AMBER_DIM))));
             lines
         }
         SetupState::Confirm => vec![
