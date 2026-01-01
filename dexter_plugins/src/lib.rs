@@ -27,6 +27,18 @@ pub trait Plugin: Send + Sync {
     
     // Execution
     fn validate_command(&self, cmd: &str) -> bool;
-    async fn dry_run(&self, cmd: &str, llm: Option<&dyn LlmBridge>) -> Result<String>;
+    async fn dry_run(&self, cmd: &str, llm: Option<&dyn LlmBridge>) -> Result<PreviewContent>;
     async fn execute(&self, cmd: &str) -> Result<String>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreviewContent {
+    Text(String),
+    DiffList(Vec<DiffItem>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffItem {
+    pub original: String,
+    pub new: String,
 }

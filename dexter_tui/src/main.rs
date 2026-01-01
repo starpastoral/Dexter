@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dexter_core::{Config, ContextScanner, Executor, LlmClient, Router};
-use dexter_plugins::{F2Plugin, FFmpegPlugin, Plugin};
+use dexter_plugins::{F2Plugin, FFmpegPlugin, Plugin, PreviewContent};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -43,7 +43,7 @@ struct App {
     logs: Vec<String>,
     tick_count: u64,
     current_context: Option<dexter_core::context::FileContext>,
-    dry_run_output: Option<String>,
+    dry_run_output: Option<PreviewContent>,
     show_debug: bool,
 }
 
@@ -143,7 +143,7 @@ impl App {
         self.logs.push(format!("Executing preview: {}", cmd));
         match plugin.dry_run(cmd, Some(self.executor.llm_client())).await {
             Ok(output) => {
-                self.logs.push(format!("Preview data captured ({} bytes)", output.len()));
+                self.logs.push("Preview data captured successfully".to_string());
                 self.dry_run_output = Some(output);
                 self.state = AppState::AwaitingConfirmation;
             }
@@ -202,8 +202,11 @@ async fn main() -> Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Check for API Keys
-    if !config.has_keys() {
+    let args: Vec<String> = std::env::args().collect();
+    let force_setup = args.contains(&"--setup".to_string());
+
+    // Check for API Keys or forced setup
+    if !config.has_keys() || force_setup {
         match run_setup_wizard(&mut terminal, config.clone()).await {
             Ok(new_config) => {
                 config = new_config;
@@ -322,25 +325,25 @@ async fn run_app(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<Stdo
 
 fn ui(f: &mut Frame, app: &App) {
     // Retro Palette
-    // Retro Palette - True Monochrome CRT
     const AMBER: Color = Color::Rgb(255, 176, 0);       // Solid Classic Amber
     const AMBER_DIM: Color = Color::Rgb(150, 110, 0);   // Balanced Dim Amber
     const RED_ALERT: Color = Color::Rgb(255, 40, 40);   // Alert Red
     const CRT_BG: Color = Color::Black;                 // Solid Black
 
-    let chunks = Layout::default()
+    let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(4), // Taller footer using blocks
+            Constraint::Length(3), // 1. Title/Header
+            Constraint::Length(5), // 2. Proposal
+            Constraint::Min(1),    // 3. Output
+            Constraint::Length(4), // 4. Footer
         ])
         .split(f.area());
 
-    // Header
     let block_style = Style::default().fg(AMBER).bg(CRT_BG);
     let border_style = Style::default().fg(AMBER_DIM);
 
+    // --- SECTION 1: TITLE (HEADER) ---
     let header_text = Line::from(vec![
         Span::styled(" D E X T E R ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
         Span::styled(" // AI COMMAND INTERFACE v0.1 ", Style::default().fg(AMBER_DIM)),
@@ -352,275 +355,89 @@ fn ui(f: &mut Frame, app: &App) {
             .borders(Borders::ALL)
             .border_style(border_style)
             .title(" SYSTEM STATUS: ONLINE "));
-    f.render_widget(header, chunks[0]);
+    f.render_widget(header, main_layout[0]);
 
-    let content_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(if app.show_debug { " DEBUG_SYSTEM_INTERNAL " } else { " TERMINAL OUTPUT " }, Style::default().fg(AMBER)));
-
-    // We'll collect lines or handle direct rendering for splitting states
-    let mut rendered_custom = false;
-    let content_text = if app.show_debug {
-        let mut debug_lines = vec![
-            Line::from(vec![
-                Span::styled(" DEBUG_MODE: ", Style::default().fg(AMBER_DIM)),
-                Span::styled("ACTIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(vec![
-                Span::styled(" CWD: ", Style::default().fg(AMBER_DIM)),
-                Span::styled(format!("{}", std::env::current_dir().unwrap_or_default().display()), Style::default().fg(AMBER)),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(" RAW_FILE_CONTEXT (HEX INSPECTION):", Style::default().fg(AMBER_DIM))),
-        ];
-
-        if let Some(ctx) = &app.current_context {
-            for (i, f) in ctx.files.iter().enumerate() {
-                let hex: String = f.chars()
-                    .map(|c| format!("\\u{{{:04X}}}", c as u32))
-                    .collect::<Vec<_>>()
-                    .join("");
-                debug_lines.push(Line::from(vec![
-                    Span::styled(format!("  {:2}. ", i + 1), Style::default().fg(AMBER_DIM)),
-                    Span::styled(f, Style::default().fg(AMBER)),
-                    Span::styled(format!("  [{}]", hex), Style::default().fg(Color::DarkGray)),
-                ]));
-            }
-        } else {
-            debug_lines.push(Line::from(Span::styled("  (No Context Scanned)", Style::default().fg(RED_ALERT))));
-        }
-        
-        debug_lines.push(Line::from(""));
-        debug_lines.push(Line::from(Span::styled(" Press Ctrl-D to exit Debug Mode", Style::default().fg(AMBER_DIM))));
-        debug_lines
-    } else {
-        match &app.state {
-        AppState::Input => {
-            let mut text = vec![
-                Line::from(Span::styled("Awaiting parameters...", Style::default().fg(AMBER_DIM))),
-                Line::from(""),
-            ];
-
-            // Display Current Context
-            if let Some(ctx) = &app.current_context {
-                text.push(Line::from(vec![
-                    Span::styled(" CURRENT_DIRECTORY: ", Style::default().fg(AMBER_DIM)),
-                    Span::styled(format!("{}", std::env::current_dir().unwrap_or_default().display()), Style::default().fg(AMBER)),
-                ]));
-                
-                let files_str = if ctx.files.is_empty() {
-                    " (Empty)".to_string()
-                } else if ctx.files.len() > 5 {
-                    format!("{} files (Top 5: {})", ctx.files.len(), ctx.files.iter().take(5).cloned().collect::<Vec<_>>().join(", "))
-                } else {
-                    ctx.files.join(", ")
-                };
-                
-                text.push(Line::from(vec![
-                   Span::styled(" FILES: ", Style::default().fg(AMBER_DIM)),
-                   Span::styled(files_str, Style::default().fg(AMBER_DIM)),
-                ]));
-
-                if let Some(summary) = &ctx.summary {
-                    text.push(Line::from(Span::styled(format!(" Note: {}", summary), Style::default().fg(AMBER_DIM))));
-                }
-                text.push(Line::from(""));
-            }
-
-            text.push(Line::from(vec![
-                Span::styled("USER_INPUT > ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                Span::styled(&app.input, Style::default().fg(Color::White)),
-                Span::styled("_", Style::default().fg(AMBER).add_modifier(Modifier::RAPID_BLINK)), // Blinking cursor
-            ]));
-            
-            if !app.logs.is_empty() {
-                 text.push(Line::from(""));
-                 text.push(Line::from(Span::styled("--- SYSTEM LOGS ---", Style::default().fg(AMBER_DIM))));
-                 for log in app.logs.iter().rev().take(5) {
-                     text.push(Line::from(Span::styled(format!(":: {}", log), Style::default().fg(AMBER_DIM))));
-                 }
-            }
-            text
-        }
-        AppState::Routing | AppState::Generating | AppState::Executing | AppState::DryRunning |
-        AppState::PendingRouting | AppState::PendingGeneration | AppState::PendingDryRun => {
-            let spinner = ["|", "/", "-", "\\"];
-            let idx = (app.tick_count as usize / 2) % spinner.len();
-            let char = spinner[idx];
-            
-            let action = match app.state {
-                AppState::Routing | AppState::PendingRouting => "CALCULATING ROUTE",
-                AppState::Generating | AppState::PendingGeneration => "SYNTHESIZING COMMAND",
-                AppState::Executing => "APPLYING CHANGES",
-                AppState::DryRunning | AppState::PendingDryRun => "FETCHING PREVIEW",
-                _ => "PROCESSING",
-            };
-            
+    // --- SECTION 2: PROPOSAL (OR INPUT/INTENT) ---
+    let (proposal_title, proposal_content) = match app.state {
+        AppState::Input => (
+            " USER INPUT ",
             vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(format!(" {} ", char), Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{}...", action), Style::default().fg(AMBER)),
+                    Span::styled(" > ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
+                    Span::styled(&app.input, Style::default().fg(Color::White)),
+                    Span::styled("_", Style::default().fg(AMBER).add_modifier(Modifier::RAPID_BLINK)),
                 ]),
-                Line::from(""),
-                Line::from(Span::styled("Consulting neural pathways...", Style::default().fg(AMBER_DIM))),
             ]
-        }
-        AppState::AwaitingConfirmation => {
-            let cmd = app.generated_command.as_ref().unwrap();
-            
-            // Split horizontal area into two vertical blocks within the content chunk
-            let confirmation_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(5), // Proposal box (Command only)
-                    Constraint::Min(1),    // Preview box
-                ])
-                .split(chunks[1]);
-            
-            // 1. Proposal Block
-            let proposal_text = vec![
-                Line::from(vec![
-                    Span::styled(format!(" {} ", cmd), Style::default().bg(AMBER).fg(CRT_BG)),
-                ]),
-            ];
-            let proposal_block = Paragraph::new(proposal_text)
-                .wrap(Wrap { trim: false })
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(Span::styled(" PROPOSAL ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD))));
-            f.render_widget(proposal_block, confirmation_chunks[0]);
-
-            // 2. Preview Block
-            let mut preview_lines = vec![];
-            if let Some(preview) = &app.dry_run_output {
-                if preview.trim().is_empty() {
-                    preview_lines.push(Line::from(Span::styled("No changes or matches detected.", Style::default().fg(AMBER_DIM))));
-                } else {
-                    let mut file_idx = 1;
-                    for line in preview.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() { continue; }
-                        
-                        if (trimmed.starts_with('*') || trimmed.starts_with('-') || trimmed.starts_with('+')) 
-                            && (trimmed.contains("---") || trimmed.contains("***") || trimmed.len() > 10) {
-                            continue;
-                        }
-                        if trimmed.contains("模拟运行") { continue; }
-
-                        if trimmed.contains('|') {
-                            let parts: Vec<&str> = trimmed.split('|')
-                                .map(|s| s.trim())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            
-                            if parts.len() >= 2 {
-                                let old_name = parts[0];
-                                let new_name = parts[1];
-                                
-                                let old_lower = old_name.to_lowercase();
-                                if old_lower.contains("original") || old_lower.contains("filename") ||
-                                   old_lower.contains("文件名") || old_lower.contains("原始") {
-                                    continue;
-                                }
-                                
-                                preview_lines.push(Line::from(vec![
-                                    Span::styled(format!("FILE [{:02}]: ", file_idx), Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                                ]));
-                                preview_lines.push(Line::from(vec![
-                                    Span::styled("  OLD: ", Style::default().fg(AMBER_DIM)),
-                                    Span::styled(old_name.to_string(), Style::default().fg(AMBER_DIM)),
-                                ]));
-                                preview_lines.push(Line::from(vec![
-                                    Span::styled("  NEW: ", Style::default().fg(AMBER)),
-                                    Span::styled(new_name.to_string(), Style::default().fg(AMBER)),
-                                ]));
-                                preview_lines.push(Line::from("")); 
-                                file_idx += 1;
-                                continue;
-                            }
-                        }
-
-                        if trimmed.to_lowercase().contains("success") || trimmed.contains("OK") {
-                            preview_lines.push(Line::from(Span::styled(format!("> {}", trimmed), Style::default().fg(AMBER))));
-                        }
-                    }
-                }
-            }
-
-            preview_lines.push(Line::from(vec![
-                Span::styled("CONFIRM EXECUTION? [", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                Span::styled("Y", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                Span::styled("/", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                Span::styled("N", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-                Span::styled("]", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-            ]));
-
-            let preview_block = Paragraph::new(preview_lines)
-                .wrap(Wrap { trim: false })
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style)
-                    .title(Span::styled(" PREVIEW ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD))));
-            f.render_widget(preview_block, confirmation_chunks[1]);
-
-            rendered_custom = true;
-            vec![]
-        }
-        AppState::Finished(output) => {
-            let mut lines = vec![
-                Line::from(Span::styled("EXECUTION COMPLETE.", Style::default().fg(Color::Green))),
+        ),
+        AppState::Routing | AppState::Generating | AppState::PendingRouting | AppState::PendingGeneration => (
+            " USER INTENT ",
+            vec![
                 Line::from(""),
-                Line::from(Span::styled("Target System Output:", Style::default().fg(AMBER_DIM))),
-            ];
-
-            // Pretty print f2 output if possible
-            if app.selected_plugin.as_deref() == Some("f2") {
-                for line in output.lines() {
-                    if line.contains(" -> ") {
-                        let parts: Vec<&str> = line.split(" -> ").collect();
-                        if parts.len() == 2 {
-                            lines.push(Line::from(vec![
-                                Span::styled(parts[0], Style::default().fg(AMBER)),
-                                Span::styled(" -> ", Style::default().fg(AMBER_DIM)),
-                                Span::styled(parts[1], Style::default().fg(Color::Green)),
-                            ]));
-                        } else {
-                            lines.push(Line::from(Span::styled(line, Style::default().fg(AMBER_DIM))));
-                        }
-                    } else {
-                        lines.push(Line::from(Span::styled(line, Style::default().fg(AMBER_DIM))));
-                    }
-                }
+                Line::from(vec![
+                    Span::styled(" > ", Style::default().fg(AMBER_DIM)),
+                    Span::styled(&app.input, Style::default().fg(AMBER_DIM)),
+                ]),
+            ]
+        ),
+        _ => {
+            if let Some(cmd) = &app.generated_command {
+                (
+                    " PROPOSAL ",
+                    vec![
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(" > ", Style::default().fg(AMBER_DIM)),
+                            Span::styled(cmd, Style::default().bg(AMBER).fg(CRT_BG).add_modifier(Modifier::BOLD)),
+                        ]),
+                    ]
+                )
             } else {
-                lines.push(Line::from(output.clone()));
+                (
+                    " USER INTENT (FAILED) ",
+                    vec![
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(" > ", Style::default().fg(RED_ALERT)),
+                            Span::styled(&app.input, Style::default().fg(RED_ALERT)),
+                        ]),
+                    ]
+                )
             }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("[PRESS ENTER TO RESET]", Style::default().fg(AMBER_DIM))));
-            lines
         }
-        AppState::Error(e) => vec![
-            Line::from(Span::styled("!!! SYSTEM FAILURE !!!", Style::default().fg(RED_ALERT).add_modifier(Modifier::BOLD))),
-            Line::from(""),
-            Line::from(Span::styled(e.clone(), Style::default().fg(RED_ALERT))),
-            Line::from(""),
-            Line::from(Span::styled("[PRESS ENTER TO ACKNOWLEDGE]", Style::default().fg(AMBER_DIM))),
-        ],
-    }
     };
 
-    if !rendered_custom {
-        let content = Paragraph::new(content_text)
-            .block(content_block)
-            .style(Style::default().fg(AMBER))
-            .wrap(Wrap { trim: false });
-        f.render_widget(content, chunks[1]);
-    }
+    let proposal_block = Paragraph::new(proposal_content)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(proposal_title, Style::default().fg(AMBER).add_modifier(Modifier::BOLD))));
+    f.render_widget(proposal_block, main_layout[1]);
 
-    // Footer
+    // --- SECTION 3: OUTPUT (PREVIEW / LOGS / STATUS) ---
+    let (output_title, output_content) = if app.show_debug {
+        (" DEBUG_SYSTEM_INTERNAL ", render_debug(app, AMBER, AMBER_DIM, RED_ALERT))
+    } else {
+        match &app.state {
+            AppState::Input => (" SYSTEM STATUS & LOGS ", render_input_view(app, AMBER, AMBER_DIM)),
+            AppState::Routing | AppState::Generating | AppState::Executing | AppState::DryRunning |
+            AppState::PendingRouting | AppState::PendingGeneration | AppState::PendingDryRun => 
+                (" PROCESSING ", render_processing_view(app, AMBER, AMBER_DIM)),
+            AppState::AwaitingConfirmation => (" PREVIEW / CONFIRMATION ", render_preview_view(app, AMBER, AMBER_DIM)),
+            AppState::Finished(out) => (" EXECUTION RESULTS ", render_finished_view(out, app.selected_plugin.as_deref(), AMBER, AMBER_DIM)),
+            AppState::Error(e) => (" SYSTEM FAILURE ", render_error_view(e, AMBER_DIM, RED_ALERT)),
+        }
+    };
+
+    let output_block = Paragraph::new(output_content)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(output_title, Style::default().fg(AMBER).add_modifier(Modifier::BOLD))));
+    f.render_widget(output_block, main_layout[2]);
+
+    // --- SECTION 4: FOOTER ---
     let state_name = format!("{:?}", app.state).to_uppercase();
     let footer_text = vec![
         Line::from(vec![
@@ -634,7 +451,182 @@ fn ui(f: &mut Frame, app: &App) {
     let footer = Paragraph::new(footer_text)
         .style(block_style)
         .block(Block::default().borders(Borders::TOP).border_style(border_style));
-    f.render_widget(footer, chunks[2]);
+    f.render_widget(footer, main_layout[3]);
+}
+
+// --- HELPER RENDERERS ---
+
+fn render_debug<'a>(app: &'a App, amber: Color, amber_dim: Color, red: Color) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" DEBUG_MODE: ", Style::default().fg(amber_dim)),
+            Span::styled("ACTIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(" CWD: ", Style::default().fg(amber_dim)),
+            Span::styled(format!("{}", std::env::current_dir().unwrap_or_default().display()), Style::default().fg(amber)),
+        ]),
+        Line::from(""),
+    ];
+
+    if let Some(ctx) = &app.current_context {
+        for (i, f) in ctx.files.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:2}. ", i + 1), Style::default().fg(amber_dim)),
+                Span::styled(f, Style::default().fg(amber)),
+            ]));
+        }
+    } else {
+        lines.push(Line::from(Span::styled("  (No Context Scanned)", Style::default().fg(red))));
+    }
+    lines
+}
+
+fn render_input_view<'a>(app: &'a App, _amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+    let mut text = vec![
+        Line::from(Span::styled("Ready for instructions. Type your command above.", Style::default().fg(amber_dim))),
+        Line::from(""),
+    ];
+
+    if let Some(ctx) = &app.current_context {
+        let files_str = if ctx.files.is_empty() {
+            " (Empty)".to_string()
+        } else if ctx.files.len() > 10 {
+            format!("{} files detected (Scan complete)", ctx.files.len())
+        } else {
+            ctx.files.join(", ")
+        };
+        
+        text.push(Line::from(vec![
+           Span::styled(" CWD_CONTEXT: ", Style::default().fg(amber_dim)),
+           Span::styled(format!("{}", std::env::current_dir().unwrap_or_default().display()), Style::default().fg(amber_dim)),
+        ]));
+        text.push(Line::from(vec![
+           Span::styled(" FILES: ", Style::default().fg(amber_dim)),
+           Span::styled(files_str, Style::default().fg(amber_dim)),
+        ]));
+        text.push(Line::from(""));
+    }
+
+    if !app.logs.is_empty() {
+         text.push(Line::from(Span::styled("--- SYSTEM LOGS ---", Style::default().fg(amber_dim))));
+         for log in app.logs.iter().rev().take(5) {
+             text.push(Line::from(Span::styled(format!(":: {}", log), Style::default().fg(amber_dim))));
+         }
+    }
+    text
+}
+
+fn render_processing_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+    let spinner = ["|", "/", "-", "\\"];
+    let idx = (app.tick_count as usize / 2) % spinner.len();
+    let char = spinner[idx];
+    
+    let action = match app.state {
+        AppState::Routing | AppState::PendingRouting => "CALCULATING ROUTE",
+        AppState::Generating | AppState::PendingGeneration => "SYNTHESIZING COMMAND",
+        AppState::Executing => "APPLYING CHANGES",
+        AppState::DryRunning | AppState::PendingDryRun => "FETCHING PREVIEW",
+        _ => "PROCESSING",
+    };
+    
+    vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!(" {} ", char), Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{}...", action), Style::default().fg(amber)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Consulting neural pathways...", Style::default().fg(amber_dim))),
+    ]
+}
+
+fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+    let mut lines = vec![];
+    
+    if let Some(preview) = &app.dry_run_output {
+        match preview {
+            PreviewContent::Text(t) => {
+                for line in t.lines() {
+                    lines.push(Line::from(Span::styled(line, Style::default().fg(amber))));
+                }
+            }
+            PreviewContent::DiffList(diffs) => {
+                if diffs.is_empty() {
+                    lines.push(Line::from(Span::styled("No changes detected.", Style::default().fg(amber_dim))));
+                } else {
+                    for (i, diff) in diffs.iter().enumerate() {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("FILE [{:02}]: ", i+1), Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("  OLD: ", Style::default().fg(amber_dim)),
+                            Span::styled(&diff.original, Style::default().fg(amber_dim)),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("  NEW: ", Style::default().fg(amber)),
+                            Span::styled(&diff.new, Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+                        ]));
+                        lines.push(Line::from(""));
+                    }
+                }
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("CONFIRM EXECUTION? [", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+        Span::styled("Y", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+        Span::styled("/", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+        Span::styled("N", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+        Span::styled("]", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+    ]));
+    
+    lines
+}
+
+fn render_finished_view<'a>(output: &'a str, plugin_name: Option<&'a str>, amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        Line::from(Span::styled("EXECUTION COMPLETE.", Style::default().fg(Color::Green))),
+        Line::from(""),
+        Line::from(Span::styled("Target System Output:", Style::default().fg(amber_dim))),
+    ];
+
+    if plugin_name == Some("f2") {
+        for line in output.lines() {
+            if line.contains(" -> ") {
+                let parts: Vec<&str> = line.split(" -> ").collect();
+                if parts.len() == 2 {
+                    lines.push(Line::from(vec![
+                        Span::styled(parts[0], Style::default().fg(amber)),
+                        Span::styled(" -> ", Style::default().fg(amber_dim)),
+                        Span::styled(parts[1], Style::default().fg(Color::Green)),
+                    ]));
+                } else {
+                    lines.push(Line::from(Span::styled(line, Style::default().fg(amber_dim))));
+                }
+            } else {
+                lines.push(Line::from(Span::styled(line, Style::default().fg(amber_dim))));
+            }
+        }
+    } else {
+        lines.push(Line::from(output.to_string()));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("[PRESS ENTER TO RESET]", Style::default().fg(amber_dim))));
+    lines
+}
+
+fn render_error_view<'a>(err: &'a str, amber_dim: Color, red: Color) -> Vec<Line<'a>> {
+    vec![
+        Line::from(Span::styled("!!! SYSTEM FAILURE !!!", Style::default().fg(red).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(Span::styled(err.to_string(), Style::default().fg(red))),
+        Line::from(""),
+        Line::from(Span::styled("[PRESS ENTER TO ACKNOWLEDGE]", Style::default().fg(amber_dim))),
+    ]
 }
 
 // --- Setup Wizard ---
@@ -644,10 +636,10 @@ enum SetupState {
     Welcome,
     GeminiKey,
     DeepSeekKey,
+    FetchingModels,
     ModelSelection,
     Confirm,
     Saving,
-    #[allow(dead_code)]
     Error(String),
 }
 
@@ -672,21 +664,45 @@ impl SetupApp {
         }
     }
 
-    fn populate_models(&mut self) {
-        self.available_models.clear();
-        if !self.gemini_key.is_empty() {
-            self.available_models.push("gemini-2.0-flash-exp (Google)".to_string());
-            self.available_models.push("gemini-1.5-pro (Google)".to_string());
+    async fn fetch_available_models(&mut self) -> Result<()> {
+        let mut all_models = Vec::new();
+
+        // Fetch from Gemini if key provided
+        if !self.gemini_key.trim().is_empty() {
+             let client = dexter_core::LlmClient::new(
+                 self.gemini_key.clone(),
+                 "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                 "gemini-pro".to_string()
+             );
+             if let Ok(models) = client.list_models().await {
+                 for m in models {
+                     all_models.push(format!("{} (Google)", m));
+                 }
+             }
         }
-        if !self.deepseek_key.is_empty() {
-            self.available_models.push("deepseek-chat (DeepSeek)".to_string());
-            self.available_models.push("deepseek-coder (DeepSeek)".to_string());
+
+        // Fetch from DeepSeek if key provided
+        if !self.deepseek_key.trim().is_empty() {
+            let client = dexter_core::LlmClient::new(
+                self.deepseek_key.clone(),
+                "https://api.deepseek.com/v1".to_string(),
+                "deepseek-chat".to_string()
+            );
+            if let Ok(models) = client.list_models().await {
+                for m in models {
+                    all_models.push(format!("{} (DeepSeek)", m));
+                }
+            }
         }
-        // Fallback default if nothing entered (though unlikely to work without keys)
-        if self.available_models.is_empty() {
-            self.available_models.push("gemini-2.0-flash-exp (Default)".to_string());
+
+        if all_models.is_empty() {
+             all_models.push("gemini-2.5-flash (Fallback)".to_string());
+             all_models.push("gemini-2.5-pro (Fallback)".to_string());
         }
+
+        self.available_models = all_models;
         self.selected_model_idx = 0;
+        Ok(())
     }
 
     async fn save_config(&mut self) -> Result<()> {
@@ -715,6 +731,15 @@ async fn run_setup_wizard(terminal: &mut Terminal<ratatui::backend::CrosstermBac
     loop {
         terminal.draw(|f| setup_ui(f, &app))?;
 
+        if app.state == SetupState::FetchingModels {
+            if let Err(e) = app.fetch_available_models().await {
+                app.state = SetupState::Error(format!("Discovery error: {}", e));
+            } else {
+                app.state = SetupState::ModelSelection;
+            }
+            continue;
+        }
+
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -738,15 +763,15 @@ async fn run_setup_wizard(terminal: &mut Terminal<ratatui::backend::CrosstermBac
                         SetupState::DeepSeekKey => {
                             match key.code {
                                 KeyCode::Enter => {
-                                    app.populate_models();
-                                    app.state = SetupState::ModelSelection;
+                                    app.state = SetupState::FetchingModels;
                                 }
                                 KeyCode::Char(c) => app.deepseek_key.push(c),
                                 KeyCode::Backspace => { app.deepseek_key.pop(); },
-                                KeyCode::Esc => app.state = SetupState::GeminiKey, // Go back
+                                KeyCode::Esc => app.state = SetupState::GeminiKey,
                                 _ => {}
                             }
                         }
+                        SetupState::FetchingModels => {} // No input while fetching
                         SetupState::ModelSelection => {
                             match key.code {
                                 KeyCode::Up | KeyCode::Left => {
@@ -842,6 +867,15 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             ]),
             Line::from(""),
             Line::from(Span::styled("(Leave empty to skip if you set Gemini)", Style::default().fg(AMBER_DIM))),
+        ],
+        SetupState::FetchingModels => vec![
+            Line::from(""),
+            Line::from(Span::styled("STEP 3: DISCOVERING MODELS", Style::default().fg(AMBER))),
+            Line::from(""),
+            Line::from("Connecting to provider APIs..."),
+            Line::from("Fetching latest model list..."),
+            Line::from(""),
+            Line::from(Span::styled("[PLEASE WAIT]", Style::default().fg(AMBER).add_modifier(Modifier::RAPID_BLINK))),
         ],
         SetupState::ModelSelection => {
             let mut lines = vec![

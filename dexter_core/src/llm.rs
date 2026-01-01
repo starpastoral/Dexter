@@ -24,13 +24,26 @@ struct ChatRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct Choice {
+    message: Option<ChatMessage>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct Choice {
-    message: ChatMessage,
+struct ModelListData {
+    models: Option<Vec<Model>>, // Gemini style
+    data: Option<Vec<Model>>,   // OpenAI/DeepSeek style
+}
+
+#[derive(Debug, Deserialize)]
+struct Model {
+    id: Option<String>,   // OpenAI style
+    name: Option<String>, // Gemini style
 }
 
 impl LlmClient {
@@ -71,16 +84,88 @@ impl LlmClient {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(anyhow!("LLM API Error: {}", error_text));
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("LLM API Error (Status {}): {}", status, text));
         }
 
-        let chat_response: ChatResponse = response.json().await?;
+        let chat_response: ChatResponse = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("Failed to parse LLM response: {} | Raw response: {}", e, text))?;
         
-        chat_response.choices.first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| anyhow!("No content in LLM response"))
+        let first_choice = chat_response.choices.first()
+            .ok_or_else(|| anyhow!("No choices returned from LLM"))?;
+
+        if let Some(msg) = &first_choice.message {
+            Ok(msg.content.clone())
+        } else if let Some(reason) = first_choice.finish_reason.as_ref() {
+            if reason.to_lowercase().contains("content_filter") {
+                Err(anyhow!("Gemini content filter triggered: PROHIBITED_CONTENT. Try rephrasing your request."))
+            } else {
+                Err(anyhow!("LLM stopped execution. Reason: {}", reason))
+            }
+        } else {
+            Err(anyhow!("No content or reason in LLM response"))
+        }
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        let is_gemini = self.base_url.contains("generativelanguage.googleapis.com");
+        let url = if is_gemini {
+            format!("{}/models?key={}", self.base_url.trim_end_matches('/').replace("/chat/completions", ""), self.api_key)
+        } else {
+            format!("{}/models", self.base_url.trim_end_matches('/').replace("/chat/completions", ""))
+        };
+
+        let mut request = self.http_client.get(&url);
+        if !is_gemini {
+            request = request.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Failed to list models (Status {}): {}", status, text));
+        }
+
+        let list_data: ModelListData = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("Failed to parse model list: {} | Raw response: {}", e, text))?;
+
+        let mut model_names = Vec::new();
+        
+        // Handle Gemini style
+        if let Some(models) = list_data.models {
+            for m in models {
+                if let Some(name) = m.name {
+                    // Extract ID from name like "models/gemini-pro"
+                    let id = name.split('/').last().unwrap_or(&name).to_string();
+                    model_names.push(id);
+                }
+            }
+        }
+        
+        // Handle OpenAI/DeepSeek style
+        if let Some(data) = list_data.data {
+            for m in data {
+                if let Some(id) = m.id {
+                    model_names.push(id);
+                }
+            }
+        }
+
+        if model_names.is_empty() {
+            return Err(anyhow!("No models found in provider response"));
+        }
+
+        // Sort and deduplicate
+        model_names.sort();
+        model_names.dedup();
+        
+        // Filter for chat-compatible names if needed, but for now return all
+        Ok(model_names)
     }
 }
 

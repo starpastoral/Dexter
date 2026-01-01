@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::Plugin;
+use crate::{Plugin, PreviewContent, DiffItem};
 use std::process::Command;
 
 pub struct F2Plugin;
@@ -49,7 +49,7 @@ Notes:
         cmd.starts_with("f2 ")
     }
 
-    async fn dry_run(&self, cmd: &str, _llm: Option<&dyn crate::LlmBridge>) -> Result<String> {
+    async fn dry_run(&self, cmd: &str, _llm: Option<&dyn crate::LlmBridge>) -> Result<PreviewContent> {
         // Ensure no-color and strip -x/-X
         let mut safe_cmd = cmd.replace(" -x", "").replace(" -X", "");
         
@@ -74,12 +74,67 @@ Notes:
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let combined = format!("{}{}", stdout, stderr);
 
-        if output.status.success() {
-            let combined = format!("{}{}", stdout, stderr);
-            Ok(combined)
+        if !output.status.success() {
+             return Err(anyhow::anyhow!("f2 error: {}", combined));
+        }
+
+        // Parse Output
+        let mut diffs = Vec::new();
+        for line in combined.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() { continue; }
+            
+            // Ignorable lines
+            if (trimmed.starts_with('*') || trimmed.starts_with('-') || trimmed.starts_with('+')) 
+                && (trimmed.contains("---") || trimmed.contains("***") || trimmed.len() > 10) {
+                continue;
+            }
+            if trimmed.contains("headers") || trimmed.contains("ORIGINAL") { continue; }
+
+            // Strategy 1: " -> "
+            if trimmed.contains(" -> ") {
+                 let parts: Vec<&str> = trimmed.split(" -> ").collect();
+                 if parts.len() == 2 {
+                     diffs.push(DiffItem {
+                         original: parts[0].trim().to_string(),
+                         new: parts[1].trim().to_string(),
+                     });
+                     continue;
+                 }
+            }
+
+            // Strategy 2: "|" table style
+            if trimmed.contains('|') {
+                let parts: Vec<&str> = trimmed.split('|')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                
+                if parts.len() >= 2 {
+                    let old_name = parts[0];
+                    let new_name = parts[1];
+                    
+                    // Filter headers
+                    let old_lower = old_name.to_lowercase();
+                    if old_lower.contains("original") || old_lower.contains("filename") {
+                        continue;
+                    }
+
+                    diffs.push(DiffItem {
+                        original: old_name.to_string(),
+                        new: new_name.to_string(),
+                    });
+                }
+            }
+        }
+
+        if !diffs.is_empty() {
+            Ok(PreviewContent::DiffList(diffs))
         } else {
-            Err(anyhow::anyhow!("f2 error: {}\n{}", stdout, stderr))
+            // If we couldn't parse logic diffs, just return text
+            Ok(PreviewContent::Text(combined))
         }
     }
 

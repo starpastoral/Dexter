@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::Plugin;
+use crate::{Plugin, PreviewContent};
 use std::process::Command;
 
 pub struct FFmpegPlugin;
@@ -43,12 +43,13 @@ Important: Always specify the input with -i and the output file at the end.
         cmd.starts_with("ffmpeg ")
     }
 
-    async fn dry_run(&self, cmd: &str, llm: Option<&dyn crate::LlmBridge>) -> Result<String> {
+    async fn dry_run(&self, cmd: &str, llm: Option<&dyn crate::LlmBridge>) -> Result<PreviewContent> {
         if let Some(llm) = llm {
             let system_prompt = "You are a playful but precise command explainer for Dexter. Describe what this FFmpeg command will do in simple terms. Mention input, output, and key transformations. Output plain text only.";
-            llm.chat(system_prompt, cmd).await
+            let text = llm.chat(system_prompt, cmd).await?;
+            Ok(PreviewContent::Text(text))
         } else {
-            Ok(format!("Executing media command: {}", cmd))
+            Ok(PreviewContent::Text(format!("Executing media command: {}", cmd)))
         }
     }
 

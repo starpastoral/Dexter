@@ -32,8 +32,8 @@ impl Default for Config {
                 base_url: None,
             },
             models: ModelPreferences {
-                router_model: "gemini-pro".to_string(), // Default safe choice
-                executor_model: "gemini-pro".to_string(),
+                router_model: "gemini-2.5-flash".to_string(), // Default safe choice
+                executor_model: "gemini-2.5-flash".to_string(),
             },
         }
     }
