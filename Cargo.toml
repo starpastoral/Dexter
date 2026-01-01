@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "dexter_core",
+    "dexter_tui",
+    "dexter_plugins",
+]
+resolver = "2"

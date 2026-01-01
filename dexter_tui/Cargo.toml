@@ -1,0 +1,19 @@
+[package]
+name = "dexter_tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dexter"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.30"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dexter_core = { path = "../dexter_core" }
+dexter_plugins = { path = "../dexter_plugins" }
