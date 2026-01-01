@@ -359,6 +359,8 @@ fn ui(f: &mut Frame, app: &App) {
         .border_style(border_style)
         .title(Span::styled(if app.show_debug { " DEBUG_SYSTEM_INTERNAL " } else { " TERMINAL OUTPUT " }, Style::default().fg(AMBER)));
 
+    // We'll collect lines or handle direct rendering for splitting states
+    let mut rendered_custom = false;
     let content_text = if app.show_debug {
         let mut debug_lines = vec![
             Line::from(vec![
@@ -468,27 +470,23 @@ fn ui(f: &mut Frame, app: &App) {
         AppState::AwaitingConfirmation => {
             let cmd = app.generated_command.as_ref().unwrap();
             
-            // Nested layout for split-box design
+            // Split horizontal area into two vertical blocks within the content chunk
             let confirmation_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(6), // Proposal box
+                    Constraint::Length(5), // Proposal box (Command only)
                     Constraint::Min(1),    // Preview box
                 ])
-                .split(f.area()); // This is a bit tricky since we're inside a function that returns lines.
-                                 // I'll refactor the ui function to handle multi-block rendering for this state.
-            
-            // Re-alignment: I will use a different approach. Instead of returning lines, 
-            // I'll render the blocks directly here and return an empty vec for the caller.
+                .split(chunks[1]);
             
             // 1. Proposal Block
             let proposal_text = vec![
-                Line::from(""),
                 Line::from(vec![
                     Span::styled(format!(" {} ", cmd), Style::default().bg(AMBER).fg(CRT_BG)),
                 ]),
             ];
             let proposal_block = Paragraph::new(proposal_text)
+                .wrap(Wrap { trim: false })
                 .block(Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style)
@@ -506,7 +504,6 @@ fn ui(f: &mut Frame, app: &App) {
                         let trimmed = line.trim();
                         if trimmed.is_empty() { continue; }
                         
-                        // Strip table noise and "Dry run" info
                         if (trimmed.starts_with('*') || trimmed.starts_with('-') || trimmed.starts_with('+')) 
                             && (trimmed.contains("---") || trimmed.contains("***") || trimmed.len() > 10) {
                             continue;
@@ -553,7 +550,6 @@ fn ui(f: &mut Frame, app: &App) {
                 }
             }
 
-            preview_lines.push(Line::from(""));
             preview_lines.push(Line::from(vec![
                 Span::styled("CONFIRM EXECUTION? [", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
                 Span::styled("Y", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
@@ -563,14 +559,15 @@ fn ui(f: &mut Frame, app: &App) {
             ]));
 
             let preview_block = Paragraph::new(preview_lines)
+                .wrap(Wrap { trim: false })
                 .block(Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style)
                     .title(Span::styled(" PREVIEW ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD))));
             f.render_widget(preview_block, confirmation_chunks[1]);
 
-            // Return empty lines as we rendered directly
-            return;
+            rendered_custom = true;
+            vec![]
         }
         AppState::Finished(output) => {
             let mut lines = vec![
@@ -615,11 +612,13 @@ fn ui(f: &mut Frame, app: &App) {
     }
     };
 
-    let content = Paragraph::new(content_text)
-        .block(content_block)
-        .style(Style::default().fg(AMBER))
-        .wrap(Wrap { trim: true });
-    f.render_widget(content, chunks[1]);
+    if !rendered_custom {
+        let content = Paragraph::new(content_text)
+            .block(content_block)
+            .style(Style::default().fg(AMBER))
+            .wrap(Wrap { trim: false });
+        f.render_widget(content, chunks[1]);
+    }
 
     // Footer
     let state_name = format!("{:?}", app.state).to_uppercase();
