@@ -1,6 +1,6 @@
+use crate::{DiffItem, Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::{Plugin, PreviewContent, DiffItem};
 use std::process::Command;
 
 pub struct F2Plugin;
@@ -16,13 +16,19 @@ impl Plugin for F2Plugin {
     }
 
     async fn is_installed(&self) -> bool {
-        Command::new("f2").arg("--version").status().map(|s| s.success()).unwrap_or(false)
+        Command::new("f2")
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     async fn install(&self) -> Result<()> {
         // Assume user uses brew on macOS or has it installed
         // In a real app, we might provide specific instructions
-        Err(anyhow::anyhow!("Please install f2 manually: 'brew install f2'"))
+        Err(anyhow::anyhow!(
+            "Please install f2 manually: 'brew install f2'"
+        ))
     }
 
     fn get_doc_for_router(&self) -> &str {
@@ -42,21 +48,53 @@ Notes:
 1. Always include -x if you want to apply the changes, otherwise f2 only shows a preview.
 2. For maximum precision, include the specific filename as a trailing argument.
 3. f2 supports full regular expressions in the -f pattern by default.
-"# 
+"#
+    }
+
+    fn get_executor_prompt(&self, context: &str, user_input: &str) -> String {
+        format!(
+            r#"You are the Renaming Specialist Agent for Dexter. 
+Your goal is to generate a precise `f2` command (a powerful batch renamer).
+
+### HARD CONSTRAINTS (MUST FOLLOW):
+1. CHARACTER PRECISION: The file list in the context is the ABSOLUTE TRUTH. 
+   - Wave Dash (`〜`, U+301C) and Full-width Tilde (`～`, U+FF5E) are DIFFERENT.
+   - You MUST match the EXACT character code from the context.
+2. EXPLICIT TARGETING: You MUST ALWAYS include the specific filename as a trailing argument in your command (e.g., `f2 -f "old" -r "new" "exact_filename.txt"`).
+3. OUTPUT ONLY: Output ONLY the command. No backticks, no markdown, no explanations.
+4. NO EXECUTION FLAGS: Do not include `-x` or `-X`.
+
+### Documentation:
+{}
+
+### Context:
+{}
+
+### User Request:
+{}
+"#,
+            self.get_doc_for_executor(),
+            context,
+            user_input
+        )
     }
 
     fn validate_command(&self, cmd: &str) -> bool {
         cmd.starts_with("f2 ")
     }
 
-    async fn dry_run(&self, cmd: &str, _llm: Option<&dyn crate::LlmBridge>) -> Result<PreviewContent> {
+    async fn dry_run(
+        &self,
+        cmd: &str,
+        _llm: Option<&dyn crate::LlmBridge>,
+    ) -> Result<PreviewContent> {
         // Ensure no-color and strip -x/-X
         let mut safe_cmd = cmd.replace(" -x", "").replace(" -X", "");
-        
+
         if !safe_cmd.contains(" --no-color") {
             safe_cmd.push_str(" --no-color");
         }
-        
+
         let final_cmd = safe_cmd;
 
         let mut cmd_obj = if cfg!(target_os = "windows") {
@@ -77,45 +115,51 @@ Notes:
         let combined = format!("{}{}", stdout, stderr);
 
         if !output.status.success() {
-             return Err(anyhow::anyhow!("f2 error: {}", combined));
+            return Err(anyhow::anyhow!("f2 error: {}", combined));
         }
 
         // Parse Output
         let mut diffs = Vec::new();
         for line in combined.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() { continue; }
-            
-            // Ignorable lines
-            if (trimmed.starts_with('*') || trimmed.starts_with('-') || trimmed.starts_with('+')) 
-                && (trimmed.contains("---") || trimmed.contains("***") || trimmed.len() > 10) {
+            if trimmed.is_empty() {
                 continue;
             }
-            if trimmed.contains("headers") || trimmed.contains("ORIGINAL") { continue; }
+
+            // Ignorable lines
+            if (trimmed.starts_with('*') || trimmed.starts_with('-') || trimmed.starts_with('+'))
+                && (trimmed.contains("---") || trimmed.contains("***") || trimmed.len() > 10)
+            {
+                continue;
+            }
+            if trimmed.contains("headers") || trimmed.contains("ORIGINAL") {
+                continue;
+            }
 
             // Strategy 1: " -> "
             if trimmed.contains(" -> ") {
-                 let parts: Vec<&str> = trimmed.split(" -> ").collect();
-                 if parts.len() == 2 {
-                     diffs.push(DiffItem {
-                         original: parts[0].trim().to_string(),
-                         new: parts[1].trim().to_string(),
-                     });
-                     continue;
-                 }
+                let parts: Vec<&str> = trimmed.split(" -> ").collect();
+                if parts.len() == 2 {
+                    diffs.push(DiffItem {
+                        original: parts[0].trim().to_string(),
+                        new: parts[1].trim().to_string(),
+                    });
+                    continue;
+                }
             }
 
             // Strategy 2: "|" table style
             if trimmed.contains('|') {
-                let parts: Vec<&str> = trimmed.split('|')
+                let parts: Vec<&str> = trimmed
+                    .split('|')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .collect();
-                
+
                 if parts.len() >= 2 {
                     let old_name = parts[0];
                     let new_name = parts[1];
-                    
+
                     // Filter headers
                     let old_lower = old_name.to_lowercase();
                     if old_lower.contains("original") || old_lower.contains("filename") {
