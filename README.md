@@ -14,7 +14,10 @@ Dexter is a terminal-based AI assistant designed to democratize powerful command
 -   **Plugin Architecture**:
     -   **F2**: Powerful batch renaming.
     -   **FFmpeg**: Complex media conversion and processing with AI-generated previews and logic validation.
--   **Premium Retro-Futurist UI**: A stunning **Amber Monochrome** TUI inspired by CRT terminals, built with `ratatui`. Features glassmorphism effects and smooth micro-animations.
+-   **Premium Retro-Futurist UI**: A stunning TUI inspired by CRT terminals, built with `ratatui`.
+    -   **Multiple Themes**: Choose between the classic **Amber Retro**, a modern **Light Mode**, or let **Auto** decide based on your system.
+    -   **Split-Box Confirmation**: Clear, visual separation between command proposals and file previews.
+    -   **Visual Polish**: Glassmorphism effects, smooth micro-animations, and dynamic spacing.
 
 ## Getting Started
 
@@ -65,7 +68,7 @@ If you prefer to build from source:
 Dexter features a **Premium Guided Setup Wizard** that launches automatically on your first run. It will assist you with:
 
 1.  **API Key Configuration**: Securely enter your Gemini, DeepSeek, or OpenAI keys.
-2.  **Model Selection**: Choose your preferred reasoning and execution models.
+2.  **Dynamic Model Discovery**: Automatically fetches and lets you select the latest available models from your providers.
 3.  **Environment Check**: Verifies that required plugins (`f2`, `ffmpeg`) are correctly installed.
 
 Configuration is persisted in `~/.config/dexter/config.toml`.
@@ -91,6 +94,23 @@ Dexter is built as a modular Rust workspace:
 -   `dexter_core`: The core logic (LLM communication, routing, and safety).
 -   `dexter_plugins`: Extensible plugin system for external CLI tools.
 -   `dexter_tui`: The high-fidelity terminal interface.
+
+## Roadmap
+
+### Plugins
+- Add imagemagick support
+- Add yt-dlp support
+- Add pandoc support
+
+### Features
+- Add Groq support
+- Add Bastern support
+- Add providers fallback
+- Improve setup flow, add provider validation
+- Proposal can be regenerated or edited
+- Keyboard shortcuts support
+- Proposal history and pinned proposals
+- LLM cache hit
 
 ## Contributing
 
