@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-echo "🚀 安装 Dexter..."
+echo "Installing Dexter..."
 
 # 构建 release 版本
-echo "📦 正在编译..."
+echo "Compiling..."
 cargo build --release
 
 # 确定安装目录
@@ -14,19 +14,19 @@ INSTALL_DIR="${HOME}/.local/bin"
 mkdir -p "${INSTALL_DIR}"
 
 # 复制二进制文件
-echo "📋 正在安装到 ${INSTALL_DIR}/dexter..."
+echo "Installing to ${INSTALL_DIR}/dexter..."
 cp target/release/dexter "${INSTALL_DIR}/dexter"
 chmod +x "${INSTALL_DIR}/dexter"
 
 echo ""
-echo "✅ Dexter 安装成功！"
+echo "Dexter Installed Successfully!"
 echo ""
 
 # 检查 PATH 配置
 if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
-    echo "⚠️  注意：${INSTALL_DIR} 不在你的 PATH 中"
+    echo "⚠️ NOTE: ${INSTALL_DIR} Is Not In Your PATH"
     echo ""
-    echo "请将以下内容添加到你的 shell 配置文件中："
+    echo "Please Add The Following To Your Shell Config File:"
     
     # 检测 shell 类型
     if [ -n "$ZSH_VERSION" ]; then
@@ -42,10 +42,9 @@ if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
     echo "  source ${SHELL_CONFIG}"
     echo ""
 else
-    echo "🎉 你现在可以在任何地方运行 'dexter' 命令了！"
+    echo "🎉  You Can Now Run DEXTER Anywhere!"
     echo ""
 fi
 
-echo "使用方法："
-echo "  dexter          # 启动 Dexter AI 助手"
+echo "Type 'dexter' To Start!"
 echo ""

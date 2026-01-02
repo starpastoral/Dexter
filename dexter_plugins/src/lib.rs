@@ -42,4 +42,5 @@ pub enum PreviewContent {
 pub struct DiffItem {
     pub original: String,
     pub new: String,
+    pub status: Option<String>,
 }

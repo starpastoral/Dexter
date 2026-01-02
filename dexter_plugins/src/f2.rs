@@ -108,10 +108,12 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
 
         let mut cmd_obj = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
+            c.env("LC_ALL", "C");
             c.args(["/C", &final_cmd]);
             c
         } else {
             let mut c = Command::new("sh");
+            c.env("LC_ALL", "C");
             c.args(["-c", &final_cmd]);
             c
         };
@@ -123,25 +125,24 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let combined = format!("{}{}", stdout, stderr);
 
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("f2 error: {}", combined));
-        }
-
-        // Parse Output
+        // Parse Output even if it failed, as f2 returns non-zero on conflicts
         let mut diffs = Vec::new();
         for line in combined.lines() {
-            let trimmed = line.trim();
+            let mut trimmed = line.trim().to_string();
             if trimmed.is_empty() {
                 continue;
             }
 
-            // Ignorable lines
-            if (trimmed.starts_with('*') || trimmed.starts_with('-') || trimmed.starts_with('+'))
-                && (trimmed.contains("---") || trimmed.contains("***") || trimmed.len() > 10)
-            {
-                continue;
-            }
-            if trimmed.contains("headers") || trimmed.contains("ORIGINAL") {
+            // More aggressive cleaning for f2's fancy table corners/borders in error cases
+            trimmed = trimmed
+                .replace("|*", "|")
+                .replace("*|", "|")
+                .replace("—", "")
+                .replace("*", "")
+                .trim()
+                .to_string();
+
+            if trimmed.is_empty() {
                 continue;
             }
 
@@ -152,6 +153,7 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
                     diffs.push(DiffItem {
                         original: parts[0].trim().to_string(),
                         new: parts[1].trim().to_string(),
+                        status: None, // No status in this format
                     });
                     continue;
                 }
@@ -168,16 +170,21 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
                 if parts.len() >= 2 {
                     let old_name = parts[0];
                     let new_name = parts[1];
+                    let status = parts.get(2).map(|s| s.to_string());
 
-                    // Filter headers
+                    // Filter headers or empty-ish rows
                     let old_lower = old_name.to_lowercase();
-                    if old_lower.contains("original") || old_lower.contains("filename") {
+                    if old_lower.contains("original")
+                        || old_lower.contains("filename")
+                        || old_name.chars().all(|c| c == ' ')
+                    {
                         continue;
                     }
 
                     diffs.push(DiffItem {
                         original: old_name.to_string(),
                         new: new_name.to_string(),
+                        status,
                     });
                 }
             }
@@ -185,8 +192,11 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
 
         if !diffs.is_empty() {
             Ok(PreviewContent::DiffList(diffs))
+        } else if !output.status.success() {
+            // If we couldn't parse any diffs AND it failed, then return the error
+            Err(anyhow::anyhow!("f2 error: {}", combined))
         } else {
-            // If we couldn't parse logic diffs, just return text
+            // If it succeeded but we couldn't parse logic diffs, just return text
             Ok(PreviewContent::Text(combined))
         }
     }
@@ -199,10 +209,12 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
 
         let mut cmd_obj = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
+            c.env("LC_ALL", "C");
             c.args(["/C", &final_cmd]);
             c
         } else {
             let mut c = Command::new("sh");
+            c.env("LC_ALL", "C");
             c.args(["-c", &final_cmd]);
             c
         };
