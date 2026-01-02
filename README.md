@@ -16,8 +16,6 @@ Dexter is a terminal-based AI assistant designed to democratize powerful command
     -   **FFmpeg**: Complex media conversion and processing with AI-generated previews and logic validation.
 -   **Premium Retro-Futurist UI**: A stunning TUI inspired by CRT terminals, built with `ratatui`.
     -   **Multiple Themes**: Choose between the classic **Amber Retro**, a modern **Light Mode**, or let **Auto** decide based on your system.
-    -   **Split-Box Confirmation**: Clear, visual separation between command proposals and file previews.
-    -   **Visual Polish**: Glassmorphism effects, smooth micro-animations, and dynamic spacing.
 
 ## Getting Started
 
@@ -98,13 +96,13 @@ Dexter is built as a modular Rust workspace:
 ## Roadmap
 
 ### Plugins
-- Add imagemagick support
+- Add ImageMagick support
 - Add yt-dlp support
-- Add pandoc support
+- Add Pandoc support
 
 ### Features
 - Add Groq support
-- Add Bastern support
+- Add Baseten support
 - Add providers fallback
 - Improve setup flow, add provider validation
 - Proposal can be regenerated or edited
