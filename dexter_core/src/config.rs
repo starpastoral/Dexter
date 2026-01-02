@@ -6,6 +6,12 @@ use tokio::fs;
 pub struct Config {
     pub api_keys: ApiKeys,
     pub models: ModelPreferences,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "retro".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,6 +39,7 @@ impl Default for Config {
                 router_model: "gemini-2.5-flash-lite".to_string(), // Default safe choice
                 executor_model: "gemini-2.5-flash-lite".to_string(),
             },
+            theme: default_theme(),
         }
     }
 }

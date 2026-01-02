@@ -16,6 +16,9 @@ use ratatui::{
 use std::io::{stdout, Stdout};
 use std::time::Duration;
 
+mod theme;
+use theme::Theme;
+
 #[derive(Clone, PartialEq, Debug)]
 enum AppState {
     Input,
@@ -46,6 +49,7 @@ struct App {
     dry_run_output: Option<PreviewContent>,
     show_debug: bool,
     config: Config,
+    theme: Theme,
 }
 
 impl App {
@@ -72,6 +76,8 @@ impl App {
         let executor_client =
             LlmClient::new(api_key, base_url, config.models.executor_model.clone());
 
+        let theme = Theme::from_config(&config.theme);
+
         Self {
             state: AppState::Input,
             input: String::new(),
@@ -86,6 +92,7 @@ impl App {
             dry_run_output: None,
             show_debug: false,
             config,
+            theme,
         }
     }
 
@@ -349,12 +356,6 @@ async fn run_app(
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    // Retro Palette
-    const AMBER: Color = Color::Rgb(255, 176, 0); // Solid Classic Amber
-    const AMBER_DIM: Color = Color::Rgb(150, 110, 0); // Balanced Dim Amber
-    const RED_ALERT: Color = Color::Rgb(255, 40, 40); // Alert Red
-    const CRT_BG: Color = Color::Black; // Solid Black
-
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -365,18 +366,15 @@ fn ui(f: &mut Frame, app: &App) {
         ])
         .split(f.area());
 
-    let block_style = Style::default().fg(AMBER).bg(CRT_BG);
-    let border_style = Style::default().fg(AMBER_DIM);
+    let block_style = app.theme.base_style;
+    let border_style = app.theme.border_style;
 
     // --- SECTION 1: TITLE (HEADER) ---
     let header_text = Line::from(vec![
-        Span::styled(
-            " D E X T E R ",
-            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" D E X T E R ", app.theme.header_title_style),
         Span::styled(
             " // AI COMMAND INTERFACE v0.1 ",
-            Style::default().fg(AMBER_DIM),
+            app.theme.header_subtitle_style,
         ),
     ]);
 
@@ -395,17 +393,9 @@ fn ui(f: &mut Frame, app: &App) {
             vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(
-                        " > ",
-                        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&app.input, Style::default().fg(Color::White)),
-                    Span::styled(
-                        "_",
-                        Style::default()
-                            .fg(AMBER)
-                            .add_modifier(Modifier::RAPID_BLINK),
-                    ),
+                    Span::styled(" > ", app.theme.input_prompt_style),
+                    Span::styled(&app.input, app.theme.input_text_style),
+                    Span::styled("_", app.theme.input_cursor_style),
                 ]),
             ],
         ),
@@ -417,8 +407,8 @@ fn ui(f: &mut Frame, app: &App) {
             vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(" > ", Style::default().fg(AMBER_DIM)),
-                    Span::styled(&app.input, Style::default().fg(AMBER_DIM)),
+                    Span::styled(" > ", app.theme.header_subtitle_style),
+                    Span::styled(&app.input, app.theme.header_subtitle_style),
                 ]),
             ],
         ),
@@ -429,8 +419,8 @@ fn ui(f: &mut Frame, app: &App) {
                     vec![
                         Line::from(""),
                         Line::from(vec![
-                            Span::styled(" > ", Style::default().fg(AMBER_DIM)),
-                            Span::styled(cmd, Style::default().bg(AMBER).fg(CRT_BG)),
+                            Span::styled(" > ", app.theme.header_subtitle_style),
+                            Span::styled(cmd, app.theme.proposal_cmd_style),
                         ]),
                     ],
                 )
@@ -440,8 +430,8 @@ fn ui(f: &mut Frame, app: &App) {
                     vec![
                         Line::from(""),
                         Line::from(vec![
-                            Span::styled(" > ", Style::default().fg(RED_ALERT)),
-                            Span::styled(&app.input, Style::default().fg(RED_ALERT)),
+                            Span::styled(" > ", app.theme.error_style),
+                            Span::styled(&app.input, app.theme.error_style),
                         ]),
                     ],
                 )
@@ -453,47 +443,32 @@ fn ui(f: &mut Frame, app: &App) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(Span::styled(
-                proposal_title,
-                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-            )),
+            .title(Span::styled(proposal_title, app.theme.header_title_style)),
     );
     f.render_widget(proposal_block, main_layout[1]);
 
     // --- SECTION 3: OUTPUT (PREVIEW / LOGS / STATUS) ---
     let (output_title, output_content) = if app.show_debug {
-        (
-            " DEBUG_SYSTEM_INTERNAL ",
-            render_debug(app, AMBER, AMBER_DIM, RED_ALERT),
-        )
+        (" DEBUG_SYSTEM_INTERNAL ", render_debug(app, &app.theme))
     } else {
         match &app.state {
-            AppState::Input => (
-                " SYSTEM STATUS & LOGS ",
-                render_input_view(app, AMBER, AMBER_DIM),
-            ),
+            AppState::Input => (" SYSTEM STATUS & LOGS ", render_input_view(app, &app.theme)),
             AppState::Routing
             | AppState::Generating
             | AppState::Executing
             | AppState::DryRunning
             | AppState::PendingRouting
             | AppState::PendingGeneration
-            | AppState::PendingDryRun => (
-                " PROCESSING ",
-                render_processing_view(app, AMBER, AMBER_DIM),
-            ),
+            | AppState::PendingDryRun => (" PROCESSING ", render_processing_view(app, &app.theme)),
             AppState::AwaitingConfirmation => (
                 " PREVIEW / CONFIRMATION ",
-                render_preview_view(app, AMBER, AMBER_DIM),
+                render_preview_view(app, &app.theme),
             ),
             AppState::Finished(out) => (
                 " EXECUTION RESULTS ",
-                render_finished_view(out, app.selected_plugin.as_deref(), AMBER, AMBER_DIM),
+                render_finished_view(out, app.selected_plugin.as_deref(), &app.theme),
             ),
-            AppState::Error(e) => (
-                " SYSTEM FAILURE ",
-                render_error_view(e, AMBER_DIM, RED_ALERT),
-            ),
+            AppState::Error(e) => (" SYSTEM FAILURE ", render_error_view(e, &app.theme)),
         }
     };
 
@@ -503,10 +478,7 @@ fn ui(f: &mut Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
-                .title(Span::styled(
-                    output_title,
-                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-                )),
+                .title(Span::styled(output_title, app.theme.header_title_style)),
         );
     f.render_widget(output_block, main_layout[2]);
 
@@ -523,16 +495,19 @@ fn ui(f: &mut Frame, app: &App) {
     let padding_1 = footer_width.saturating_sub(left_text_1.len() + right_text_1.len());
 
     let line1 = Line::from(vec![
-        Span::styled(" MODE: ", Style::default().fg(AMBER_DIM)),
-        Span::styled(state_name, Style::default().fg(AMBER)),
+        Span::styled(" MODE: ", app.theme.footer_text_style),
+        Span::styled(state_name, app.theme.footer_highlight_style),
         Span::styled(" ".repeat(padding_1), Style::default()),
-        Span::styled("ROUTER: ", Style::default().fg(AMBER_DIM)),
-        Span::styled(&app.config.models.router_model, Style::default().fg(AMBER)),
-        Span::styled(" | ", Style::default().fg(AMBER_DIM)),
-        Span::styled("EXECUTOR: ", Style::default().fg(AMBER_DIM)),
+        Span::styled("ROUTER: ", app.theme.footer_text_style),
+        Span::styled(
+            &app.config.models.router_model,
+            app.theme.footer_highlight_style,
+        ),
+        Span::styled(" | ", app.theme.footer_text_style),
+        Span::styled("EXECUTOR: ", app.theme.footer_text_style),
         Span::styled(
             &app.config.models.executor_model,
-            Style::default().fg(AMBER),
+            app.theme.footer_highlight_style,
         ),
         Span::styled(" ", Style::default()),
     ]);
@@ -544,10 +519,10 @@ fn ui(f: &mut Frame, app: &App) {
     let padding_2 = footer_width.saturating_sub(left_text_2.len() + right_text_2.len());
 
     let line2 = Line::from(vec![
-        Span::styled(left_text_2, Style::default().fg(Color::Black).bg(AMBER)),
+        Span::styled(left_text_2, app.theme.footer_key_style),
         Span::styled(" ".repeat(padding_2), Style::default()),
-        Span::styled(" PROVIDER: ", Style::default().fg(AMBER_DIM)),
-        Span::styled(provider_name, Style::default().fg(AMBER)),
+        Span::styled(" PROVIDER: ", app.theme.footer_text_style),
+        Span::styled(provider_name, app.theme.footer_highlight_style),
         Span::styled(" ", Style::default()),
     ]);
 
@@ -581,22 +556,17 @@ fn get_provider_name(config: &Config) -> String {
 
 // --- HELPER RENDERERS ---
 
-fn render_debug<'a>(app: &'a App, amber: Color, amber_dim: Color, red: Color) -> Vec<Line<'a>> {
+fn render_debug<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(" DEBUG_MODE: ", Style::default().fg(amber_dim)),
-            Span::styled(
-                "ACTIVE",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" DEBUG_MODE: ", theme.header_subtitle_style),
+            Span::styled("ACTIVE", theme.success_style.add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled(" CWD: ", Style::default().fg(amber_dim)),
+            Span::styled(" CWD: ", theme.header_subtitle_style),
             Span::styled(
                 format!("{}", std::env::current_dir().unwrap_or_default().display()),
-                Style::default().fg(amber),
+                theme.header_title_style,
             ),
         ]),
         Line::from(""),
@@ -605,25 +575,25 @@ fn render_debug<'a>(app: &'a App, amber: Color, amber_dim: Color, red: Color) ->
     if let Some(ctx) = &app.current_context {
         for (i, f) in ctx.files.iter().enumerate() {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:2}. ", i + 1), Style::default().fg(amber_dim)),
-                Span::styled(f, Style::default().fg(amber)),
+                Span::styled(format!("  {:2}. ", i + 1), theme.header_subtitle_style),
+                Span::styled(f, theme.header_title_style),
             ]));
         }
     } else {
         lines.push(Line::from(Span::styled(
             "  (No Context Scanned)",
-            Style::default().fg(red),
+            theme.error_style,
         )));
     }
     lines
 }
 
-fn render_input_view<'a>(app: &'a App, _amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+fn render_input_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "Ready for instructions. Type your command above.",
-            Style::default().fg(amber_dim),
+            theme.header_subtitle_style,
         )),
         Line::from(""),
     ];
@@ -638,15 +608,15 @@ fn render_input_view<'a>(app: &'a App, _amber: Color, amber_dim: Color) -> Vec<L
         };
 
         text.push(Line::from(vec![
-            Span::styled(" CWD_CONTEXT: ", Style::default().fg(amber_dim)),
+            Span::styled(" CWD_CONTEXT: ", theme.header_subtitle_style),
             Span::styled(
                 format!("{}", std::env::current_dir().unwrap_or_default().display()),
-                Style::default().fg(amber_dim),
+                theme.header_subtitle_style,
             ),
         ]));
         text.push(Line::from(vec![
-            Span::styled(" FILES: ", Style::default().fg(amber_dim)),
-            Span::styled(files_str, Style::default().fg(amber_dim)),
+            Span::styled(" FILES: ", theme.header_subtitle_style),
+            Span::styled(files_str, theme.header_subtitle_style),
         ]));
         text.push(Line::from(""));
     }
@@ -654,19 +624,19 @@ fn render_input_view<'a>(app: &'a App, _amber: Color, amber_dim: Color) -> Vec<L
     if !app.logs.is_empty() {
         text.push(Line::from(Span::styled(
             "--- SYSTEM LOGS ---",
-            Style::default().fg(amber_dim),
+            theme.header_subtitle_style,
         )));
         for log in app.logs.iter().rev().take(5) {
             text.push(Line::from(Span::styled(
                 format!(":: {}", log),
-                Style::default().fg(amber_dim),
+                theme.header_subtitle_style,
             )));
         }
     }
     text
 }
 
-fn render_processing_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     let spinner = ["|", "/", "-", "\\"];
     let idx = (app.tick_count as usize / 2) % spinner.len();
     let char = spinner[idx];
@@ -682,45 +652,42 @@ fn render_processing_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> V
     vec![
         Line::from(""), // NEW: Added empty line at top
         Line::from(vec![
-            Span::styled(
-                format!(" {} ", char),
-                Style::default().fg(amber).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{}...", action), Style::default().fg(amber)),
+            Span::styled(format!(" {} ", char), theme.processing_spinner_style),
+            Span::styled(format!("{}...", action), theme.processing_text_style),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             "Consulting neural pathways...",
-            Style::default().fg(amber_dim),
+            theme.header_subtitle_style,
         )),
     ]
 }
 
-fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<Line<'a>> {
+fn render_preview_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     let mut lines = vec![Line::from("")]; // NEW: Start with an empty line
 
     if let Some(preview) = &app.dry_run_output {
         match preview {
             PreviewContent::Text(t) => {
                 for line in t.lines() {
-                    lines.push(Line::from(Span::styled(line, Style::default().fg(amber))));
+                    lines.push(Line::from(Span::styled(line, theme.processing_text_style)));
                 }
             }
             PreviewContent::DiffList(diffs) => {
                 if diffs.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "No changes detected.",
-                        Style::default().fg(amber_dim),
+                        theme.header_subtitle_style,
                     )));
                 } else {
                     for (i, diff) in diffs.iter().enumerate() {
                         let mut header_spans = vec![Span::styled(
                             format!("FILE [{:02}]: ", i + 1),
-                            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+                            theme.diff_header_style,
                         )];
 
                         if let Some(status) = &diff.status {
-                            let status_style = Style::default().bg(amber).fg(Color::Black);
+                            let status_style = theme.proposal_cmd_style;
                             header_spans.push(Span::styled(
                                 format!(" [{}] ", status.to_uppercase()),
                                 status_style,
@@ -729,12 +696,12 @@ fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<
 
                         lines.push(Line::from(header_spans));
                         lines.push(Line::from(vec![
-                            Span::styled("  OLD: ", Style::default().fg(amber_dim)),
-                            Span::styled(&diff.original, Style::default().fg(amber_dim)),
+                            Span::styled("  OLD: ", theme.diff_removed_style),
+                            Span::styled(&diff.original, theme.diff_removed_style),
                         ]));
                         lines.push(Line::from(vec![
-                            Span::styled("  NEW: ", Style::default().fg(amber)),
-                            Span::styled(&diff.new, Style::default().fg(amber)),
+                            Span::styled("  NEW: ", theme.diff_added_style),
+                            Span::styled(&diff.new, theme.diff_added_style),
                         ]));
                         lines.push(Line::from(""));
                     }
@@ -745,14 +712,11 @@ fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(
-            "CONFIRM EXECUTION? [",
-            Style::default().fg(amber).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Y", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
-        Span::styled("/", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
-        Span::styled("N", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
-        Span::styled("]", Style::default().fg(amber).add_modifier(Modifier::BOLD)),
+        Span::styled("CONFIRM EXECUTION? [", theme.input_prompt_style),
+        Span::styled("Y", theme.input_prompt_style),
+        Span::styled("/", theme.input_prompt_style),
+        Span::styled("N", theme.input_prompt_style),
+        Span::styled("]", theme.input_prompt_style),
     ]));
 
     lines
@@ -761,18 +725,17 @@ fn render_preview_view<'a>(app: &'a App, amber: Color, amber_dim: Color) -> Vec<
 fn render_finished_view<'a>(
     output: &'a str,
     plugin_name: Option<&'a str>,
-    amber: Color,
-    amber_dim: Color,
+    theme: &Theme,
 ) -> Vec<Line<'a>> {
     let mut lines = vec![
         Line::from(Span::styled(
             "EXECUTION COMPLETE.",
-            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+            theme.success_style.add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Target System Output:",
-            Style::default().fg(amber_dim),
+            theme.header_subtitle_style,
         )),
     ];
 
@@ -782,21 +745,15 @@ fn render_finished_view<'a>(
                 let parts: Vec<&str> = line.split(" -> ").collect();
                 if parts.len() == 2 {
                     lines.push(Line::from(vec![
-                        Span::styled(parts[0], Style::default().fg(amber)),
-                        Span::styled(" -> ", Style::default().fg(amber_dim)),
-                        Span::styled(parts[1], Style::default().fg(Color::Green)),
+                        Span::styled(parts[0], theme.processing_text_style),
+                        Span::styled(" -> ", theme.header_subtitle_style),
+                        Span::styled(parts[1], theme.success_style),
                     ]));
                 } else {
-                    lines.push(Line::from(Span::styled(
-                        line,
-                        Style::default().fg(amber_dim),
-                    )));
+                    lines.push(Line::from(Span::styled(line, theme.header_subtitle_style)));
                 }
             } else {
-                lines.push(Line::from(Span::styled(
-                    line,
-                    Style::default().fg(amber_dim),
-                )));
+                lines.push(Line::from(Span::styled(line, theme.header_subtitle_style)));
             }
         }
     } else {
@@ -806,23 +763,23 @@ fn render_finished_view<'a>(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "[PRESS ENTER TO RESET]",
-        Style::default().fg(amber_dim),
+        theme.header_subtitle_style,
     )));
     lines
 }
 
-fn render_error_view<'a>(err: &'a str, amber_dim: Color, red: Color) -> Vec<Line<'a>> {
+fn render_error_view<'a>(err: &'a str, theme: &Theme) -> Vec<Line<'a>> {
     vec![
         Line::from(Span::styled(
             "!!! SYSTEM FAILURE !!!",
-            Style::default().fg(red).add_modifier(Modifier::BOLD),
+            theme.error_style.add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(err.to_string(), Style::default().fg(red))),
+        Line::from(Span::styled(err.to_string(), theme.error_style)),
         Line::from(""),
         Line::from(Span::styled(
             "[PRESS ENTER TO ACKNOWLEDGE]",
-            Style::default().fg(amber_dim),
+            theme.header_subtitle_style,
         )),
     ]
 }
@@ -836,6 +793,7 @@ enum SetupState {
     DeepSeekKey,
     FetchingModels,
     ModelSelection,
+    ThemeSelection,
     Confirm,
     Saving,
     Error(String),
@@ -847,7 +805,10 @@ struct SetupApp {
     deepseek_key: String,
     available_models: Vec<String>,
     selected_model_idx: usize,
+    available_themes: Vec<(&'static str, &'static str)>,
+    selected_theme_idx: usize,
     config: Config,
+    theme: Theme,
 }
 
 impl SetupApp {
@@ -858,12 +819,20 @@ impl SetupApp {
             deepseek_key: String::new(),
             available_models: Vec::new(),
             selected_model_idx: 0,
+            available_themes: vec![
+                ("auto", "🔄 Auto (Follow system appearance)"),
+                ("retro", "🌙 Retro (Classic amber CRT aesthetic)"),
+                ("light", "☀️ Light (Clean blue/white for light terminals)"),
+            ],
+            selected_theme_idx: 0,
+            theme: Theme::retro(),
             config,
         }
     }
 
     async fn fetch_available_models(&mut self) -> Result<()> {
         let mut all_models = Vec::new();
+        let mut errors = Vec::new();
 
         // Fetch from Gemini if key provided
         if !self.gemini_key.trim().is_empty() {
@@ -872,9 +841,14 @@ impl SetupApp {
                 "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 "gemini-flash".to_string(),
             );
-            if let Ok(models) = client.list_models().await {
-                for m in models {
-                    all_models.push(format!("{} (Google)", m));
+            match client.list_models().await {
+                Ok(models) => {
+                    for m in models {
+                        all_models.push(format!("{} (Google)", m));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("Gemini Error: {}", e));
                 }
             }
         }
@@ -886,14 +860,28 @@ impl SetupApp {
                 "https://api.deepseek.com/v1".to_string(),
                 "deepseek-chat".to_string(),
             );
-            if let Ok(models) = client.list_models().await {
-                for m in models {
-                    all_models.push(format!("{} (DeepSeek)", m));
+            match client.list_models().await {
+                Ok(models) => {
+                    for m in models {
+                        all_models.push(format!("{} (DeepSeek)", m));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("DeepSeek Error: {}", e));
                 }
             }
         }
 
         if all_models.is_empty() {
+            if !errors.is_empty() {
+                // If we have errors and no models, fail loudly so user can see why
+                return Err(anyhow::anyhow!(
+                    "Model Discovery Failed:\n{}",
+                    errors.join("\n")
+                ));
+            }
+
+            // Only fallback if no keys provided or no errors (just empty lists?)
             all_models.push("gemini-2.5-flash (Fallback)".to_string());
             all_models.push("gemini-2.5-pro (Fallback)".to_string());
         }
@@ -921,6 +909,10 @@ impl SetupApp {
 
         self.config.models.router_model = model_id.clone();
         self.config.models.executor_model = model_id;
+
+        // Save selected theme
+        let theme_id = self.available_themes[self.selected_theme_idx].0;
+        self.config.theme = theme_id.to_string();
 
         self.config.save().await?;
         Ok(())
@@ -988,8 +980,25 @@ async fn run_setup_wizard(
                                     app.selected_model_idx += 1;
                                 }
                             }
-                            KeyCode::Enter => app.state = SetupState::Confirm,
+                            KeyCode::Enter => app.state = SetupState::ThemeSelection,
                             KeyCode::Esc => app.state = SetupState::DeepSeekKey,
+                            _ => {}
+                        },
+                        SetupState::ThemeSelection => match key.code {
+                            KeyCode::Up | KeyCode::Left => {
+                                if app.selected_theme_idx > 0 {
+                                    app.selected_theme_idx -= 1;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Right => {
+                                if app.selected_theme_idx
+                                    < app.available_themes.len().saturating_sub(1)
+                                {
+                                    app.selected_theme_idx += 1;
+                                }
+                            }
+                            KeyCode::Enter => app.state = SetupState::Confirm,
+                            KeyCode::Esc => app.state = SetupState::ModelSelection,
                             _ => {}
                         },
                         SetupState::Confirm => {
@@ -1000,14 +1009,15 @@ async fn run_setup_wizard(
                                     return Ok(app.config);
                                 }
                                 KeyCode::Esc | KeyCode::Char('n') => {
-                                    app.state = SetupState::ModelSelection; // Go back
+                                    app.state = SetupState::ThemeSelection; // Go back
                                 }
                                 _ => {}
                             }
                         }
                         SetupState::Error(_) => {
                             if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
-                                return Err(anyhow!("Setup failed"));
+                                // Allow user to go back to key entry instead of crashing
+                                app.state = SetupState::GeminiKey;
                             }
                         }
                         _ => {}
@@ -1019,9 +1029,6 @@ async fn run_setup_wizard(
 }
 
 fn setup_ui(f: &mut Frame, app: &SetupApp) {
-    const AMBER: Color = Color::Rgb(255, 176, 0);
-    const AMBER_DIM: Color = Color::Rgb(128, 88, 0);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1034,12 +1041,12 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
     // Header
     let header = Paragraph::new(Span::styled(
         " D E X T E R  //  INITIALIZATION ",
-        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        app.theme.header_title_style,
     ))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(AMBER_DIM)),
+            .border_style(app.theme.border_style),
     );
     f.render_widget(header, chunks[0]);
 
@@ -1049,94 +1056,87 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             Line::from(""),
             Line::from(Span::styled(
                 "WELCOME TO DEXTER",
-                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                app.theme.header_title_style,
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "Dexter Requires Access to Advanced Neural Networks to Function.",
-                Style::default().fg(AMBER_DIM),
+                app.theme.header_subtitle_style,
             )),
             Line::from("We Will Guide You Through Setting Up Your API Keys."),
             Line::from(""),
             Line::from(Span::styled(
                 "[PRESS ENTER TO BEGIN]",
-                Style::default()
-                    .fg(AMBER)
-                    .add_modifier(Modifier::RAPID_BLINK),
+                app.theme.input_cursor_style,
             )),
         ],
         SetupState::GeminiKey => vec![
             Line::from(Span::styled(
                 "STEP 1: GEMINI API KEY",
-                Style::default().fg(AMBER),
+                app.theme.header_title_style,
             )),
             Line::from(""),
             Line::from("Enter Your Google Gemini API Key:"),
             Line::from(""),
             Line::from(vec![
-                Span::styled("> ", Style::default().fg(AMBER)),
+                Span::styled("> ", app.theme.input_prompt_style),
                 Span::styled(
                     if app.gemini_key.is_empty() {
                         "_"
                     } else {
                         &app.gemini_key
                     },
-                    Style::default().fg(Color::White),
+                    app.theme.input_text_style,
                 ),
             ]),
             Line::from(""),
             Line::from(Span::styled(
                 "(Press Enter to Leave Empty If You Only Have DeepSeek)",
-                Style::default().fg(AMBER_DIM),
+                app.theme.header_subtitle_style,
             )),
         ],
         SetupState::DeepSeekKey => vec![
             Line::from(Span::styled(
                 "STEP 2: DEEPSEEK API KEY",
-                Style::default().fg(AMBER),
+                app.theme.header_title_style,
             )),
             Line::from(""),
             Line::from("Enter Your DeepSeek API Key:"),
             Line::from(""),
             Line::from(vec![
-                Span::styled("> ", Style::default().fg(AMBER)),
+                Span::styled("> ", app.theme.input_prompt_style),
                 Span::styled(
                     if app.deepseek_key.is_empty() {
                         "_"
                     } else {
                         &app.deepseek_key
                     },
-                    Style::default().fg(Color::White),
+                    app.theme.input_text_style,
                 ),
             ]),
             Line::from(""),
             Line::from(Span::styled(
                 "(Press Enter to Leave Empty to Skip If You Only Have Gemini)",
-                Style::default().fg(AMBER_DIM),
+                app.theme.header_subtitle_style,
             )),
         ],
         SetupState::FetchingModels => vec![
             Line::from(""),
             Line::from(Span::styled(
                 "STEP 3: DISCOVERING MODELS",
-                Style::default().fg(AMBER),
+                app.theme.header_title_style,
             )),
             Line::from(""),
             Line::from("Connecting to Provider APIs..."),
             Line::from("Fetching Latest Model List..."),
             Line::from(""),
-            Line::from(Span::styled(
-                "[PLEASE WAIT]",
-                Style::default()
-                    .fg(AMBER)
-                    .add_modifier(Modifier::RAPID_BLINK),
-            )),
+            Line::from(Span::styled("[PLEASE WAIT]", app.theme.input_cursor_style)),
         ],
         SetupState::ModelSelection => {
             let mut lines = vec![
                 Line::from(Span::styled(
                     "STEP 3: SELECT PRIMARY MODEL",
-                    Style::default().fg(AMBER),
+                    app.theme.header_title_style,
                 )),
                 Line::from(""),
                 Line::from("Select the AI Model to Power Dexter:"),
@@ -1145,9 +1145,9 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
 
             for (i, model) in app.available_models.iter().enumerate() {
                 let style = if i == app.selected_model_idx {
-                    Style::default().fg(Color::Black).bg(AMBER)
+                    app.theme.proposal_cmd_style
                 } else {
-                    Style::default().fg(AMBER_DIM)
+                    app.theme.header_subtitle_style
                 };
                 let prefix = if i == app.selected_model_idx {
                     "> "
@@ -1163,12 +1163,50 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "(Use Arrow Keys to Select, ENTER to Confirm)",
-                Style::default().fg(AMBER_DIM),
+                app.theme.header_subtitle_style,
+            )));
+            lines
+        }
+        SetupState::ThemeSelection => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "STEP 4: SELECT THEME",
+                    app.theme.header_title_style,
+                )),
+                Line::from(""),
+                Line::from("Choose your preferred color scheme:"),
+                Line::from(""),
+            ];
+
+            for (i, (_, display_name)) in app.available_themes.iter().enumerate() {
+                let style = if i == app.selected_theme_idx {
+                    app.theme.proposal_cmd_style
+                } else {
+                    app.theme.header_subtitle_style
+                };
+                let prefix = if i == app.selected_theme_idx {
+                    "> "
+                } else {
+                    "  "
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", prefix, display_name),
+                    style,
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "(Use Arrow Keys to Select, ENTER to Confirm)",
+                app.theme.header_subtitle_style,
             )));
             lines
         }
         SetupState::Confirm => vec![
-            Line::from(Span::styled("CONFIRM SETTINGS", Style::default().fg(AMBER))),
+            Line::from(Span::styled(
+                "CONFIRM SETTINGS",
+                app.theme.header_title_style,
+            )),
             Line::from(""),
             Line::from(format!(
                 "Gemini Key: {}",
@@ -1192,19 +1230,21 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
                     .get(app.selected_model_idx)
                     .unwrap_or(&"Unknown".to_string())
             )),
+            Line::from(format!(
+                "Theme: {}",
+                app.available_themes[app.selected_theme_idx].1
+            )),
             Line::from(""),
             Line::from(Span::styled(
                 "Save and Initialize? [Y/n]",
-                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                app.theme.input_prompt_style,
             )),
         ],
         SetupState::Saving => vec![
             Line::from(""),
             Line::from(Span::styled(
                 "SAVING CONFIGURATION...",
-                Style::default()
-                    .fg(AMBER)
-                    .add_modifier(Modifier::RAPID_BLINK),
+                app.theme.input_cursor_style,
             )),
         ],
         SetupState::Error(e) => vec![
@@ -1217,10 +1257,10 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(AMBER_DIM))
+                .border_style(app.theme.border_style)
                 .title(" SETUP WIZARD "),
         )
-        .style(Style::default().fg(AMBER))
+        .style(app.theme.base_style)
         .wrap(Wrap { trim: true });
     f.render_widget(content, chunks[1]);
 }
