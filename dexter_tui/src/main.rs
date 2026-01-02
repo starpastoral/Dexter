@@ -825,7 +825,7 @@ impl SetupApp {
                 ("light", "☀️ Light (Clean blue/white for light terminals)"),
             ],
             selected_theme_idx: 0,
-            theme: Theme::retro(),
+            theme: Theme::from_config(&config.theme),
             config,
         }
     }
@@ -988,6 +988,9 @@ async fn run_setup_wizard(
                             KeyCode::Up | KeyCode::Left => {
                                 if app.selected_theme_idx > 0 {
                                     app.selected_theme_idx -= 1;
+                                    // Live preview
+                                    let theme_id = app.available_themes[app.selected_theme_idx].0;
+                                    app.theme = Theme::from_config(theme_id);
                                 }
                             }
                             KeyCode::Down | KeyCode::Right => {
@@ -995,6 +998,9 @@ async fn run_setup_wizard(
                                     < app.available_themes.len().saturating_sub(1)
                                 {
                                     app.selected_theme_idx += 1;
+                                    // Live preview
+                                    let theme_id = app.available_themes[app.selected_theme_idx].0;
+                                    app.theme = Theme::from_config(theme_id);
                                 }
                             }
                             KeyCode::Enter => app.state = SetupState::Confirm,

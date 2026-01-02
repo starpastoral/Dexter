@@ -55,7 +55,7 @@ impl Theme {
         let bg = Color::Black;
 
         Self {
-            base_style: Style::default().fg(amber).bg(bg),
+            base_style: Style::default().fg(amber),
             border_style: Style::default().fg(amber_dim),
 
             header_title_style: Style::default().fg(amber).add_modifier(Modifier::BOLD),
@@ -89,13 +89,12 @@ impl Theme {
         let text_main = Color::Black;
         let text_dim = Color::DarkGray;
         let accent = Color::Blue;
-        let bg = Color::White;
         let red_alert = Color::Red;
         let green_success = Color::Green;
 
         Self {
-            base_style: Style::default().fg(text_main).bg(bg),
-            border_style: Style::default().fg(Color::Gray),
+            base_style: Style::default().fg(text_main),
+            border_style: Style::default().fg(accent),
 
             header_title_style: Style::default().fg(accent).add_modifier(Modifier::BOLD),
             header_subtitle_style: Style::default().fg(text_dim),

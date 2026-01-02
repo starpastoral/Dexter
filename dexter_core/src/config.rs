@@ -11,7 +11,7 @@ pub struct Config {
 }
 
 fn default_theme() -> String {
-    "retro".to_string()
+    "auto".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
