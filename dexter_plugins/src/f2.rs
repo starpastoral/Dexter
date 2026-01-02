@@ -27,7 +27,7 @@ impl Plugin for F2Plugin {
         // Assume user uses brew on macOS or has it installed
         // In a real app, we might provide specific instructions
         Err(anyhow::anyhow!(
-            "Please install f2 manually: 'brew install f2'"
+            "Please install F2 manually: 'brew install f2'"
         ))
     }
 
@@ -37,12 +37,21 @@ impl Plugin for F2Plugin {
 
     fn get_doc_for_executor(&self) -> &str {
         r#"f2 Command Usage:
-- Simple find and replace: f2 -f "find" -r "replace"
-- Regex find and replace: f2 -f "regexp" -r "replacement"
-- Target specific file: f2 -f "find" -r "replace" "filename.txt"
-- Undo last operation: f2 -u
-- Preview changes: f2 -f "..." -r "..." (Default shows preview)
-- Execute changes: f2 -f "..." -r "..." -x
+- Simple find/replace: f2 -f "old" -r "new"
+- Regex find/replace: f2 -f "(\d+)" -r "IMG_$1"
+- Target specific file: f2 -f "old" -r "new" "file.txt"
+- Undo last operation: f2 -u -x
+- Variable Syntax:
+    - Use {{var}} for file attributes (e.g., {{ext}}, {{isoDate}}).
+    - Use $1 for Regex capture groups.
+    - Correction: Use double curly braces {{id}}, NOT {id}.
+    - Counter: Use {{%03d}} for zero-padded numbers, NOT %03d.
+
+Complex Examples:
+- Rename with Regex capture + 3-digit counter + Execute:
+  f2 -f 'Photo_(\d+)' -r 'Trip_$1_{{%03d}}' -x
+- Undo the last operation:
+  f2 -u -x
 
 Notes:
 1. Always include -x if you want to apply the changes, otherwise f2 only shows a preview.

@@ -35,13 +35,25 @@ impl Plugin for FFmpegPlugin {
 
     fn get_doc_for_executor(&self) -> &str {
         r#"ffmpeg Command Usage:
-- Convert video format: ffmpeg -i input.mp4 output.mkv
-- Extract audio: ffmpeg -i input.mp4 -vn -acodec libmp3lame output.mp3
+- Convert video format: ffmpeg -i input.mov output.mp4
+- Extract audio: ffmpeg -i input.mp4 -vn -c:a libmp3lame output.mp3
 - Change resolution: ffmpeg -i input.mp4 -vf scale=1280:720 output_720p.mp4
-- Fast seek and clip: ffmpeg -ss 00:00:10 -i input.mp4 -t 00:00:30 -c copy output.mp4
-- Compress video: ffmpeg -i input.mp4 -vcodec libx265 -crf 28 output.mp4
+- Fast seek and clip (Place -ss BEFORE -i): ffmpeg -ss 00:00:10 -i input.mp4 -t 00:00:30 -c copy output.mp4
 
-Important: Always specify the input with -i and the output file at the end.
+Modern Usage & Syntax Override:
+1. Stream Selection: ALWAYS use -c:v / -c:a instead of -vcodec / -acodec.
+2. Fast Seeking: Place -ss BEFORE -i for performance.
+3. Web MP4: ALWAYS add -movflags +faststart for web compatibility.
+
+Complex Examples:
+- Transcode to H.264/AAC with CRF 23 and Faststart:
+  ffmpeg -i in.mov -c:v libx264 -crf 23 -preset slow -c:a aac -b:a 128k -movflags +faststart out.mp4
+- Overlay watermark (bottom-right) using complex filter:
+  ffmpeg -i main.mp4 -i logo.png -filter_complex "[0:v][1:v]overlay=W-w-10:H-h-10" out.mp4
+
+CRITICAL RULES:
+- NEVER use -sameq (it does not exist). Use -crf (video) or -q:a (audio).
+- Distinguish -vf (single stream) vs -filter_complex (multi-stream/input).
 "#
     }
 
@@ -51,10 +63,11 @@ Important: Always specify the input with -i and the output file at the end.
 Your goal is to generate a valid `ffmpeg` command.
 
 ### GUIDELINES:
-1. INPUT/OUTPUT: Always use `-i` for inputs. Place the output filename at the end of the command.
-2. PRECISION: Use the exact filenames provided in the context.
-3. OUTPUT ONLY: Output ONLY the command. No backticks, no markdown, no explanations.
-4. SAFE DEFAULTS: If specific technical parameters (like bitrate) are not provided, use sensible defaults or skip them.
+1. MODERN SYNTAX: Use `-c:v`/`-c:a`. Place `-ss` before `-i`. Add `-movflags +faststart` for MP4.
+2. INPUT/OUTPUT: Always use `-i` for inputs. Place the output filename at the end.
+3. PRECISION: Use the exact filenames provided in the context.
+4. OUTPUT ONLY: Output ONLY the command. No backticks, no markdown, no explanations.
+5. SAFE DEFAULTS: If specific technical parameters are not provided, use sensible defaults.
 
 ### Documentation:
 {}
