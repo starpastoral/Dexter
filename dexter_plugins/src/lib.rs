@@ -12,6 +12,12 @@ pub trait LlmBridge: Send + Sync {
     async fn chat(&self, system: &str, user: &str) -> Result<String>;
 }
 
+#[derive(Debug, Clone)]
+pub struct Progress {
+    pub percentage: Option<f64>, // 0.0 - 100.0
+    pub message: String,
+}
+
 #[async_trait]
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &str;
@@ -28,8 +34,18 @@ pub trait Plugin: Send + Sync {
 
     // Execution
     fn validate_command(&self, cmd: &str) -> bool;
-    async fn dry_run(&self, cmd: &str, llm: Option<&dyn LlmBridge>) -> Result<PreviewContent>;
     async fn execute(&self, cmd: &str) -> Result<String>;
+    async fn dry_run(&self, cmd: &str, llm: Option<&dyn LlmBridge>) -> Result<PreviewContent>;
+
+    // New method with default implementation
+    async fn execute_with_progress(
+        &self,
+        cmd: &str,
+        _progress_tx: tokio::sync::mpsc::Sender<Progress>,
+    ) -> Result<String> {
+        // Default: just call execute
+        self.execute(cmd).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

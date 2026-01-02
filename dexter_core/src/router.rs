@@ -24,7 +24,7 @@ impl Router {
         &self,
         user_input: &str,
         context: &FileContext,
-        plugins: &[Box<dyn Plugin>],
+        plugins: &[std::sync::Arc<dyn Plugin>],
     ) -> Result<String> {
         let plugin_list: Vec<String> = plugins
             .iter()

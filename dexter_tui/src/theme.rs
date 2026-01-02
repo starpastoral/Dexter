@@ -81,7 +81,7 @@ impl Theme {
             footer_key_style: Style::default().fg(bg).bg(amber),
 
             error_style: Style::default().fg(red_alert),
-            success_style: Style::default().fg(Color::Green),
+            success_style: Style::default().fg(bg).bg(amber),
         }
     }
 
@@ -100,7 +100,7 @@ impl Theme {
             header_subtitle_style: Style::default().fg(text_dim),
 
             input_prompt_style: Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            input_text_style: Style::default().fg(text_main),
+            input_text_style: Style::default().fg(accent),
             input_cursor_style: Style::default()
                 .fg(accent)
                 .add_modifier(Modifier::RAPID_BLINK),
@@ -110,16 +110,16 @@ impl Theme {
             processing_spinner_style: Style::default().fg(accent).add_modifier(Modifier::BOLD),
             processing_text_style: Style::default().fg(accent),
 
-            diff_header_style: Style::default().fg(text_main).add_modifier(Modifier::BOLD),
-            diff_added_style: Style::default().fg(green_success),
-            diff_removed_style: Style::default().fg(red_alert),
+            diff_header_style: Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            diff_added_style: Style::default().fg(accent),
+            diff_removed_style: Style::default().fg(text_dim),
 
             footer_text_style: Style::default().fg(text_dim),
             footer_highlight_style: Style::default().fg(accent),
             footer_key_style: Style::default().fg(Color::White).bg(accent),
 
             error_style: Style::default().fg(red_alert),
-            success_style: Style::default().fg(green_success),
+            success_style: Style::default().fg(Color::White).bg(accent),
         }
     }
 }

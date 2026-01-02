@@ -14,7 +14,10 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{stdout, Stdout};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 mod theme;
 use theme::Theme;
@@ -40,7 +43,7 @@ struct App {
     input: String,
     router: Router,
     executor: Executor,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<Arc<dyn Plugin>>,
     selected_plugin: Option<String>,
     generated_command: Option<String>,
     logs: Vec<String>,
@@ -50,6 +53,11 @@ struct App {
     show_debug: bool,
     config: Config,
     theme: Theme,
+
+    // Async execution handling
+    progress_rx: Option<mpsc::Receiver<dexter_plugins::Progress>>,
+    execution_result_rx: Option<oneshot::Receiver<Result<String>>>,
+    progress: Option<dexter_plugins::Progress>,
 }
 
 impl App {
@@ -83,7 +91,10 @@ impl App {
             input: String::new(),
             router: Router::new(router_client),
             executor: Executor::new(executor_client),
-            plugins: vec![Box::new(F2Plugin), Box::new(FFmpegPlugin)],
+            plugins: vec![
+                Arc::new(F2Plugin) as Arc<dyn Plugin>,
+                Arc::new(FFmpegPlugin) as Arc<dyn Plugin>,
+            ],
             selected_plugin: None,
             generated_command: None,
             logs: vec!["Dexter initialized. Ready for your command.".to_string()],
@@ -93,6 +104,9 @@ impl App {
             show_debug: false,
             config,
             theme,
+            progress_rx: None,
+            execution_result_rx: None,
+            progress: None,
         }
     }
 
@@ -182,7 +196,6 @@ impl App {
             self.state = AppState::Executing;
             self.logs
                 .push(format!("Executing [{}]: {}", plugin_name, cmd));
-
             // Record to history
             if let Err(e) = self.executor.record_history(&plugin_name, cmd).await {
                 self.logs.push(format!("History log failed: {}", e));
@@ -192,7 +205,8 @@ impl App {
                 .plugins
                 .iter()
                 .find(|p| p.name() == plugin_name)
-                .unwrap();
+                .unwrap()
+                .clone();
 
             // Adjust command for actual execution if needed (e.g., adding -x for f2)
             let final_cmd = if plugin_name == "f2" && !cmd.contains(" -x") && !cmd.contains(" -X") {
@@ -201,16 +215,18 @@ impl App {
                 cmd.clone()
             };
 
-            match plugin.execute(&final_cmd).await {
-                Ok(output) => {
-                    self.state = AppState::Finished(output);
-                    // Refresh context after execution
-                    let _ = self.update_context().await;
-                }
-                Err(e) => {
-                    self.state = AppState::Error(format!("Execution failed: {}", e));
-                }
-            }
+            let (prog_tx, prog_rx) = mpsc::channel(10);
+            let (res_tx, res_rx) = oneshot::channel();
+
+            // Spawn execution task
+            tokio::spawn(async move {
+                let result = plugin.execute_with_progress(&final_cmd, prog_tx).await;
+                let _ = res_tx.send(result);
+            });
+
+            self.progress_rx = Some(prog_rx);
+            self.execution_result_rx = Some(res_rx);
+            self.progress = None; // Reset progress
         }
         Ok(())
     }
@@ -287,6 +303,39 @@ async fn run_app(
             AppState::PendingDryRun => {
                 app.state = AppState::DryRunning;
                 app.run_dry_run().await?;
+            }
+            AppState::Executing => {
+                // Check for progress updates
+                if let Some(rx) = &mut app.progress_rx {
+                    while let Ok(prog) = rx.try_recv() {
+                        app.progress = Some(prog);
+                    }
+                }
+
+                // Check for completion
+                let mut finished = false;
+                if let Some(rx) = &mut app.execution_result_rx {
+                    if let Ok(result) = rx.try_recv() {
+                        finished = true;
+                        match result {
+                            Ok(output) => {
+                                app.state = AppState::Finished(output);
+                                app.logs
+                                    .push("Execution completed successfully.".to_string());
+                                let _ = app.update_context().await;
+                            }
+                            Err(e) => {
+                                app.state = AppState::Error(format!("Execution failed: {}", e));
+                            }
+                        }
+                    }
+                }
+
+                if finished {
+                    app.progress_rx = None;
+                    app.execution_result_rx = None;
+                    app.progress = None;
+                }
             }
             _ => {}
         }
@@ -649,18 +698,41 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         _ => "PROCESSING",
     };
 
-    vec![
-        Line::from(""), // NEW: Added empty line at top
+    let mut lines = vec![
+        Line::from(""),
         Line::from(vec![
             Span::styled(format!(" {} ", char), theme.processing_spinner_style),
             Span::styled(format!("{}...", action), theme.processing_text_style),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
+    ];
+
+    if let Some(prog) = &app.progress {
+        lines.push(Line::from(vec![
+            Span::styled(" STATUS: ", theme.header_subtitle_style),
+            Span::styled(&prog.message, theme.processing_text_style),
+        ]));
+
+        if let Some(pct) = prog.percentage {
+            // Simple text-based bar if we have percentage
+            let width: usize = 40;
+            let filled = (pct / 100.0 * width as f64) as usize;
+            let bar = format!(
+                "[{}{}] {:.1}%",
+                "=".repeat(filled),
+                "-".repeat(width.saturating_sub(filled)),
+                pct
+            );
+            lines.push(Line::from(Span::styled(bar, theme.processing_text_style)));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
             "Consulting neural pathways...",
             theme.header_subtitle_style,
-        )),
-    ]
+        )));
+    }
+
+    lines
 }
 
 fn render_preview_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {

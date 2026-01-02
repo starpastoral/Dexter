@@ -2,6 +2,7 @@ use crate::{Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::process::Command;
+use tokio::io::AsyncBufReadExt;
 
 pub struct FFmpegPlugin;
 
@@ -106,25 +107,95 @@ Your goal is to generate a valid `ffmpeg` command.
     }
 
     async fn execute(&self, cmd: &str) -> Result<String> {
-        let mut cmd_obj = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.args(["/C", cmd]);
-            c
+        self.execute_with_progress(cmd, tokio::sync::mpsc::channel(1).0)
+            .await
+    }
+
+    async fn execute_with_progress(
+        &self,
+        cmd: &str,
+        progress_tx: tokio::sync::mpsc::Sender<crate::Progress>,
+    ) -> Result<String> {
+        let mut child = if cfg!(target_os = "windows") {
+            tokio::process::Command::new("cmd")
+                .args(["/C", cmd])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?
         } else {
-            let mut c = Command::new("sh");
-            c.args(["-c", cmd]);
-            c
+            tokio::process::Command::new("sh")
+                .args(["-c", cmd])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?
         };
 
-        let cwd = std::env::current_dir()?;
-        let output = cmd_obj.current_dir(cwd).output()?;
+        // FFmpeg writes progress to stderr
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture stderr"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
 
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let mut stderr_reader = tokio::io::BufReader::new(stderr).lines();
+        let mut stdout_reader = tokio::io::BufReader::new(stdout).lines();
+
+        // Progress regex: time=HH:MM:SS.mm
+        let re = regex::Regex::new(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})").unwrap();
+
+        let tx = progress_tx.clone();
+
+        // Spawn a task to read stderr and report progress
+        let stderr_handle = tokio::spawn(async move {
+            let mut captured_err = String::new();
+            while let Ok(Some(line)) = stderr_reader.next_line().await {
+                captured_err.push_str(&line);
+                captured_err.push('\n');
+
+                if let Some(caps) = re.captures(&line) {
+                    if let Some(time_match) = caps.get(1) {
+                        let _ = tx
+                            .send(crate::Progress {
+                                percentage: None, // We don't know total duration yet
+                                message: format!("Processing: time={}", time_match.as_str()),
+                            })
+                            .await;
+                    }
+                }
+            }
+            captured_err
+        });
+
+        // Read stdout as well (though ffmpeg mostly uses stderr)
+        let stdout_handle = tokio::spawn(async move {
+            let mut captured_out = String::new();
+            while let Ok(Some(line)) = stdout_reader.next_line().await {
+                captured_out.push_str(&line);
+                captured_out.push('\n');
+            }
+            captured_out
+        });
+
+        let status = child.wait().await?;
+        let err_output = stderr_handle.await?;
+        let out_output = stdout_handle.await?;
+
+        if status.success() {
+            // Combine stdout and stderr for the log, or just stdout if that's what we want.
+            // FFmpeg usually outputs file details to valid output but "stats" to stderr.
+            // If we just want the "result", usually there is no stdout for ffmpeg unless -f is specified.
+            // Let's return combined output or just a success message if empty.
+            let combined = format!("{}\n{}", out_output, err_output);
+            Ok(if combined.trim().is_empty() {
+                "Command executed successfully (no output)".to_string()
+            } else {
+                combined
+            })
         } else {
-            Err(anyhow::anyhow!(
-                String::from_utf8_lossy(&output.stderr).to_string()
-            ))
+            Err(anyhow::anyhow!(err_output))
         }
     }
 }

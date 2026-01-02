@@ -63,9 +63,9 @@ If you prefer to build from source:
 
 ## Configuration & Guided Setup
 
-Dexter features a **Premium Guided Setup Wizard** that launches automatically on your first run. It will assist you with:
+Dexter features a **Guided Setup Wizard** that launches automatically on your first run. It will assist you with:
 
-1.  **API Key Configuration**: Securely enter your Gemini, DeepSeek, or OpenAI keys.
+1.  **API Key Configuration**: Securely enter your Gemini, DeepSeek.
 2.  **Dynamic Model Discovery**: Automatically fetches and lets you select the latest available models from your providers.
 3.  **Environment Check**: Verifies that required plugins (`f2`, `ffmpeg`) are correctly installed.
 
