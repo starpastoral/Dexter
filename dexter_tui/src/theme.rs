@@ -90,7 +90,6 @@ impl Theme {
         let text_dim = Color::DarkGray;
         let accent = Color::Blue;
         let red_alert = Color::Red;
-        let green_success = Color::Green;
 
         Self {
             base_style: Style::default().fg(text_main),

@@ -537,23 +537,14 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Line 1: Mode (Left) + Models (Right)
     let left_text_1 = format!(" MODE: {}", state_name);
-    let right_text_1 = format!(
-        "ROUTER: {} | EXECUTOR: {} ",
-        app.config.models.router_model, app.config.models.executor_model
-    );
+    let right_text_1 = format!("MODEL: {} ", app.config.models.executor_model);
     let padding_1 = footer_width.saturating_sub(left_text_1.len() + right_text_1.len());
 
     let line1 = Line::from(vec![
         Span::styled(" MODE: ", app.theme.footer_text_style),
         Span::styled(state_name, app.theme.footer_highlight_style),
         Span::styled(" ".repeat(padding_1), Style::default()),
-        Span::styled("ROUTER: ", app.theme.footer_text_style),
-        Span::styled(
-            &app.config.models.router_model,
-            app.theme.footer_highlight_style,
-        ),
-        Span::styled(" | ", app.theme.footer_text_style),
-        Span::styled("EXECUTOR: ", app.theme.footer_text_style),
+        Span::styled("MODEL: ", app.theme.footer_text_style),
         Span::styled(
             &app.config.models.executor_model,
             app.theme.footer_highlight_style,
