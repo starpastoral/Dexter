@@ -46,7 +46,10 @@ impl Executor {
 
         let command = self
             .llm_client
-            .completion(&system_prompt, user_input)
+            .completion(
+                &system_prompt,
+                "Please generate the exact command based on the instructions above.",
+            )
             .await?;
         let clean_command = command
             .trim()

@@ -41,10 +41,13 @@ impl Router {
             r#"You are the Router Agent for Dexter.
 Your job is to map User Intent to the best available Plugin.
 
-Available Plugins:
+### USER INTENT:
 {}
 
-Context:
+### Available Plugins:
+{}
+
+### Context:
 {}
 
 Output Format: JSON
@@ -54,13 +57,17 @@ Output Format: JSON
   "reasoning": "why this plugin"
 }}
 "#,
+            user_input,
             plugin_list.join("\n"),
             context_str
         );
 
         let response = self
             .llm_client
-            .completion(&system_prompt, user_input)
+            .completion(
+                &system_prompt,
+                "Which plugin should be used for this intent?",
+            )
             .await?;
 
         // Parse JSON from response (naive parsing, ensuring json block extraction might be needed in prod)

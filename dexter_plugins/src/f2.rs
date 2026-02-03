@@ -43,20 +43,25 @@ impl Plugin for F2Plugin {
 - Undo last operation: f2 -u -x
 - Variable Syntax:
     - Use {{var}} for file attributes (e.g., {{ext}}, {{isoDate}}).
-    - Use $1 for Regex capture groups.
+    - Use $1, $2, etc., for Regex capture groups.
     - Correction: Use double curly braces {{id}}, NOT {id}.
     - Counter: Use {{%03d}} for zero-padded numbers, NOT %03d.
 
 Complex Examples:
 - Rename with Regex capture + 3-digit counter + Execute:
   f2 -f 'Photo_(\d+)' -r 'Trip_$1_{{%03d}}' -x
+- Remove enclosing brackets but keep content (e.g., "【1】" -> "1"):
+  f2 -f '【(\d+)】' -r '$1'
+- Multiple replacements with spacing (e.g., "【1】【2】" -> "1 2"):
+  f2 -f '【(\d+)】【(\d+)】' -r '$1 $2'
 - Undo the last operation:
   f2 -u -x
 
 Notes:
-1. Always include -x if you want to apply the changes, otherwise f2 only shows a preview.
-2. For maximum precision, include the specific filename as a trailing argument.
-3. f2 supports full regular expressions in the -f pattern by default.
+1. CAPTURE GROUPS: To preserve part of the matched text (like a number inside brackets), you MUST wrap that part in parentheses `()` in the `-f` pattern and refer to it as `$1` in the `-r` pattern.
+2. Always include -x if you want to apply the changes, otherwise f2 only shows a preview.
+3. For maximum precision, include the specific filename as a trailing argument.
+4. f2 supports full regular expressions in the -f pattern by default.
 "#
     }
 
@@ -69,7 +74,9 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
 1. CHARACTER PRECISION: The file list in the context is the ABSOLUTE TRUTH. 
    - Wave Dash (`〜`, U+301C) and Full-width Tilde (`～`, U+FF5E) are DIFFERENT.
    - You MUST match the EXACT character code from the context.
-2. EXPLICIT TARGETING: You MUST ALWAYS include the specific filename as a trailing argument in your command (e.g., `f2 -f "old" -r "new" "exact_filename.txt"`).
+2. SMART TARGETING: Although the context provides folder content, do NOT automatically include specific filenames as trailing arguments.
+   - ONLY include specific filenames if the user explicitly intends to target those specific files.
+   - For general batch renaming, rely on the `-f` pattern to match files.
 3. OUTPUT ONLY: Output ONLY the command. No backticks, no markdown, no explanations.
 4. NO EXECUTION FLAGS: Do not include `-x` or `-X`.
 
