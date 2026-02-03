@@ -1,8 +1,10 @@
 pub mod f2;
 pub mod ffmpeg;
+pub mod ytdlp;
 
 pub use f2::F2Plugin;
 pub use ffmpeg::FFmpegPlugin;
+pub use ytdlp::YtDlpPlugin;
 
 use anyhow::Result;
 use async_trait::async_trait;

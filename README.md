@@ -14,6 +14,7 @@ Dexter is a terminal-based AI assistant designed to democratize powerful command
 -   **Plugin Architecture**:
     -   **F2**: Powerful batch renaming.
     -   **FFmpeg**: Complex media conversion and processing with AI-generated previews and logic validation.
+    -   **yt-dlp**: Download videos or audio with format selection and audio extraction.
 -   **Premium Retro-Futurist UI**: A stunning TUI inspired by CRT terminals, built with `ratatui`.
     -   **Multiple Themes**: Choose between the classic **Amber Retro**, a modern **Light Mode**, or let **Auto** decide based on your system.
 
@@ -24,6 +25,7 @@ Dexter is a terminal-based AI assistant designed to democratize powerful command
 -   **Rust** (latest stable)
 -   **FFmpeg** (must be in your `$PATH`)
 -   **F2** (must be in your `$PATH`)
+-   **yt-dlp** (must be in your `$PATH`)
 
 ### Quick Install (Recommended)
 
@@ -85,6 +87,9 @@ Simply launch Dexter and type your intent in natural language.
     
     *Dexter will validate the FFmpeg flags and provide a dry-run preview before execution.*
 
+*   **Media Downloading**:
+    > "Download this YouTube video as mp3 and save it to ./music with the title as filename."
+
 ## Architecture
 
 Dexter is built as a modular Rust workspace:
@@ -97,7 +102,6 @@ Dexter is built as a modular Rust workspace:
 
 ### Plugins
 - Add ImageMagick support
-- Add yt-dlp support
 - Add Pandoc support
 
 ### Features

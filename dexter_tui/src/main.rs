@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dexter_core::{Config, ContextScanner, Executor, LlmClient, Router};
-use dexter_plugins::{F2Plugin, FFmpegPlugin, Plugin, PreviewContent};
+use dexter_plugins::{F2Plugin, FFmpegPlugin, Plugin, PreviewContent, YtDlpPlugin};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -94,6 +94,7 @@ impl App {
             plugins: vec![
                 Arc::new(F2Plugin) as Arc<dyn Plugin>,
                 Arc::new(FFmpegPlugin) as Arc<dyn Plugin>,
+                Arc::new(YtDlpPlugin) as Arc<dyn Plugin>,
             ],
             selected_plugin: None,
             generated_command: None,
