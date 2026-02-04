@@ -14,9 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-    },
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::io::{stdout, Stdout};
@@ -99,8 +97,6 @@ struct App {
     // Output scrolling
     output_scroll: u16,
     output_max_scroll: u16,
-    output_content_length: u16,
-    output_viewport_height: u16,
     output_scrollbar_rect: Option<Rect>,
 
     // Async execution handling
@@ -163,8 +159,6 @@ impl App {
             footer_focus: 0,
             output_scroll: 0,
             output_max_scroll: 0,
-            output_content_length: 0,
-            output_viewport_height: 0,
             output_scrollbar_rect: None,
             routing_result_rx: None,
             generation_result_rx: None,
@@ -1107,44 +1101,19 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_widget(&output_block, main_layout[3]);
 
     let inner = output_block.inner(main_layout[3]);
-
-    // Optional progress gauge (native ratatui widget) shown in the output box.
-    let show_gauge = should_show_progress_gauge(app) && inner.height > 1;
-    let (gauge_rect, text_region) = if show_gauge {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
-            .split(inner);
-        (Some(chunks[0]), chunks[1])
-    } else {
-        (None, inner)
-    };
-    app.output_viewport_height = text_region.height;
-
-    if let Some(r) = gauge_rect {
-        let (ratio, label, gauge_style) = build_progress_gauge(app);
-        let gauge = Gauge::default()
-            .ratio(ratio)
-            .label(label)
-            .style(app.theme.base_style)
-            .gauge_style(gauge_style);
-        f.render_widget(gauge, r);
-    }
-
-    let show_scrollbar =
-        app.output_max_scroll > 0 && text_region.width > 1 && text_region.height > 0;
+    let show_scrollbar = app.output_max_scroll > 0 && inner.width > 1 && inner.height > 0;
     app.output_scrollbar_rect = if show_scrollbar {
         Some(Rect {
-            x: text_region.x + text_region.width - 1,
-            y: text_region.y,
+            x: inner.x + inner.width - 1,
+            y: inner.y,
             width: 1,
-            height: text_region.height,
+            height: inner.height,
         })
     } else {
         None
     };
 
-    let mut text_area = text_region;
+    let mut text_area = inner;
     if show_scrollbar {
         text_area.width = text_area.width.saturating_sub(1);
     }
@@ -1164,8 +1133,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(app.theme.border_style)
             .track_style(app.theme.base_style);
-        // Render scrollbar only for the text region (so it doesn't overlap the progress gauge).
-        f.render_stateful_widget(scrollbar, text_region, &mut scrollbar_state);
+        f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
     }
 
     // --- SECTION 5: FOOTER (MODE/MODEL/PROVIDER) ---
@@ -1476,10 +1444,17 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         _ => "PROCESSING",
     };
 
-    let mut lines = vec![Line::from(""), Line::from(vec![
-        Span::styled(format!(" {} ", char), theme.processing_spinner_style),
-        Span::styled(format!("{}...", action), theme.processing_text_style),
-    ])];
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!(" {} ", char), theme.processing_spinner_style),
+            Span::styled(format!("{}...", action), theme.processing_text_style),
+        ]),
+        Line::from(Span::styled(
+            ai_thinking_animation(app.tick_count, action),
+            theme.header_subtitle_style,
+        )),
+    ];
 
     if let Some(prog) = &app.progress {
         if !prog.message.trim().is_empty() {
@@ -1490,11 +1465,11 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         }
     } else {
         let msg = match (app.tick_count / 25) % 5 {
-            0 => "Warming up the command generator...",
-            1 => "Negotiating with the API gremlins...",
-            2 => "Checking pockets for extra tokens...",
-            3 => "Applying artisanal, free-range heuristics...",
-            _ => "Holding your place in the queue...",
+            0 => "Warming up the command generator (no caffeine detected).",
+            1 => "Negotiating with the API gremlins (politely).",
+            2 => "Checking pockets for extra tokens (lint-free).",
+            3 => "Applying artisanal, free-range heuristics.",
+            _ => "Holding your place in the queue. Please enjoy the silence.",
         };
         lines.push(Line::from(Span::styled(msg, theme.header_subtitle_style)));
     }
@@ -1504,63 +1479,38 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     lines
 }
 
-fn should_show_progress_gauge(app: &App) -> bool {
-    matches!(
-        app.state,
-        AppState::Routing
-            | AppState::Generating
-            | AppState::Executing
-            | AppState::DryRunning
-            | AppState::PendingRouting
-            | AppState::PendingGeneration
-            | AppState::PendingDryRun
-    )
-}
-
-fn build_progress_gauge<'a>(app: &'a App) -> (f64, Span<'a>, Style) {
-    // Prefer a real percentage if the plugin provides one. Otherwise, show an animated bar.
-    let (ratio, label) = match &app.progress {
-        Some(p) => {
-            if let Some(pct) = p.percentage {
-                let r = (pct / 100.0).clamp(0.0, 1.0);
-                (r, format!("{:.0}% {}", pct, p.message))
-            } else {
-                let phase = (app.tick_count % 200) as f64;
-                let r = if phase <= 100.0 {
-                    phase / 100.0
-                } else {
-                    (200.0 - phase) / 100.0
-                };
-                (r, p.message.clone())
-            }
-        }
-        None => {
-            let phase = (app.tick_count % 200) as f64;
-            let r = if phase <= 100.0 {
-                phase / 100.0
-            } else {
-                (200.0 - phase) / 100.0
-            };
-            let action = match app.state {
-                AppState::Routing | AppState::PendingRouting => "Routing",
-                AppState::Generating | AppState::PendingGeneration => "Generating",
-                AppState::DryRunning | AppState::PendingDryRun => "Previewing",
-                AppState::Executing => "Executing",
-                _ => "Working",
-            };
-            let quip = match (app.tick_count / 20) % 4 {
-                0 => "",
-                1 => " (petting electrons)",
-                2 => " (aligning bits)",
-                _ => " (asking nicely)",
-            };
-            (r, format!("{}...{}", action, quip))
-        }
+fn ai_thinking_animation(tick: u64, action: &str) -> String {
+    // A tiny, intentionally low-stakes animation for "AI is working".
+    //
+    // Example:
+    //   LLM CORE: [....@...........] (SYNTHESIZING COMMAND)
+    let width: usize = 22;
+    let t = (tick / 2) as usize;
+    let period = (width.saturating_sub(1)).max(1);
+    let phase = t % (period * 2);
+    let pos = if phase <= period {
+        phase
+    } else {
+        (period * 2) - phase
     };
 
-    // Use a strong filled style so it reads well across themes.
-    let gauge_style = app.theme.footer_key_style;
-    (ratio, Span::styled(label, app.theme.header_subtitle_style), gauge_style)
+    let mut bar = String::with_capacity(width);
+    for i in 0..width {
+        if i == pos {
+            bar.push('@');
+        } else {
+            bar.push('.');
+        }
+    }
+
+    let aside = match (tick / 40) % 4 {
+        0 => "Listening for vibes",
+        1 => "Asking the model nicely",
+        2 => "Summoning plausible syntax",
+        _ => "Definitely not guessing",
+    };
+
+    format!("LLM CORE: [{}] ({}, {})", bar, action, aside)
 }
 
 fn render_preview_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
@@ -1752,17 +1702,9 @@ fn update_output_scroll_bounds(
         ])
         .split(area);
 
-    let output_inner_height = main_layout[3].height.saturating_sub(2); // subtract borders
-    let gauge_height = if should_show_progress_gauge(app) && output_inner_height > 1 {
-        1
-    } else {
-        0
-    };
-    let output_viewport_height = output_inner_height.saturating_sub(gauge_height);
+    let output_viewport_height = main_layout[3].height.saturating_sub(2); // subtract borders
     let (_, lines) = build_output_view(app);
     let line_count = lines.len() as u16;
-    app.output_content_length = line_count;
-    app.output_viewport_height = output_viewport_height;
 
     let max_scroll = line_count.saturating_sub(output_viewport_height);
     app.output_max_scroll = max_scroll;
