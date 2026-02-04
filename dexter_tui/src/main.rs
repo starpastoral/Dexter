@@ -104,6 +104,9 @@ struct App {
     output_scrollbar_rect: Option<Rect>,
 
     // Async execution handling
+    routing_result_rx: Option<oneshot::Receiver<Result<String>>>,
+    generation_result_rx: Option<oneshot::Receiver<Result<String>>>,
+    dry_run_result_rx: Option<oneshot::Receiver<Result<PreviewContent>>>,
     progress_rx: Option<mpsc::Receiver<dexter_plugins::Progress>>,
     execution_result_rx: Option<oneshot::Receiver<Result<String>>>,
     progress: Option<dexter_plugins::Progress>,
@@ -163,6 +166,9 @@ impl App {
             output_content_length: 0,
             output_viewport_height: 0,
             output_scrollbar_rect: None,
+            routing_result_rx: None,
+            generation_result_rx: None,
+            dry_run_result_rx: None,
             progress_rx: None,
             execution_result_rx: None,
             progress: None,
@@ -172,93 +178,6 @@ impl App {
     async fn update_context(&mut self) -> Result<()> {
         let context = ContextScanner::scan_cwd().await?;
         self.current_context = Some(context);
-        Ok(())
-    }
-
-    async fn run_routing(&mut self) -> Result<()> {
-        // Always refresh context before routing to ensure latest file list
-        self.update_context().await?;
-        let context = self.current_context.as_ref().unwrap();
-
-        match self
-            .router
-            .route(&self.input, &context, &self.plugins)
-            .await
-        {
-            Ok(plugin_name) => {
-                self.selected_plugin = Some(plugin_name.clone());
-                self.logs.push(format!("Routed to plugin: {}", plugin_name));
-                self.state = AppState::PendingGeneration;
-            }
-            Err(e) => {
-                self.state = AppState::Error(format!("Routing error: {}", e));
-            }
-        }
-        Ok(())
-    }
-
-    async fn run_generation(&mut self) -> Result<()> {
-        let plugin_name = self.selected_plugin.as_ref().unwrap();
-        let plugin = self
-            .plugins
-            .iter()
-            .find(|p| p.name() == *plugin_name)
-            .unwrap();
-        let context = self.current_context.as_ref().unwrap();
-
-        match self
-            .executor
-            .generate_command(&self.input, &context, plugin.as_ref())
-            .await
-        {
-            Ok(cmd) => {
-                self.generated_command = Some(cmd.clone());
-                self.command_draft = cmd.clone();
-                self.logs.push(format!("Generated command: {}", cmd));
-                self.dry_run_output = None;
-                self.output_scroll = 0;
-                self.state = AppState::PendingDryRun;
-            }
-            Err(e) => {
-                self.state = AppState::Error(format!("Generation error: {}", e));
-            }
-        }
-        Ok(())
-    }
-
-    async fn run_dry_run(&mut self) -> Result<()> {
-        let cmd = self.generated_command.as_ref().unwrap();
-        let plugin_name = self.selected_plugin.as_ref().unwrap();
-        let plugin = self
-            .plugins
-            .iter()
-            .find(|p| p.name() == *plugin_name)
-            .ok_or_else(|| anyhow!("Plugin not found"))?;
-
-        // Re-check safety/validity for user-edited commands.
-        if let Err(e) = SafetyGuard::default().check(cmd) {
-            self.state = AppState::Error(format!("Safety check failed: {}", e));
-            return Ok(());
-        }
-        if !plugin.validate_command(cmd) {
-            self.state = AppState::Error("Command failed plugin validation logic".to_string());
-            return Ok(());
-        }
-
-        self.logs.push(format!("Executing preview: {}", cmd));
-        match plugin.dry_run(cmd, Some(self.executor.llm_client())).await {
-            Ok(output) => {
-                self.logs
-                    .push("Preview data captured successfully".to_string());
-                self.dry_run_output = Some(output);
-                self.output_scroll = 0;
-                self.state = AppState::AwaitingConfirmation;
-            }
-            Err(e) => {
-                self.logs.push(format!("Preview failed: {}", e));
-                self.state = AppState::Error(format!("Dry run failed: {}", e));
-            }
-        }
         Ok(())
     }
 
@@ -404,15 +323,160 @@ async fn run_app(
         match app.state {
             AppState::PendingRouting => {
                 app.state = AppState::Routing;
-                app.run_routing().await?;
+                let _ = app.update_context().await;
+                let input = app.input.clone();
+                let context = app
+                    .current_context
+                    .clone()
+                    .unwrap_or(dexter_core::context::FileContext {
+                        files: Vec::new(),
+                        summary: None,
+                    });
+                let plugins = app.plugins.clone();
+                let llm = app.router.llm_client().clone();
+
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let router = Router::new(llm);
+                    let res = router.route(&input, &context, &plugins).await;
+                    let _ = tx.send(res);
+                });
+                app.routing_result_rx = Some(rx);
             }
             AppState::PendingGeneration => {
                 app.state = AppState::Generating;
-                app.run_generation().await?;
+                let plugin_name = match app.selected_plugin.clone() {
+                    Some(p) => p,
+                    None => {
+                        app.state = AppState::Error("No plugin selected".to_string());
+                        continue;
+                    }
+                };
+                let plugin = match app.plugins.iter().find(|p| p.name() == plugin_name) {
+                    Some(p) => p.clone(),
+                    None => {
+                        app.state = AppState::Error("Plugin not found".to_string());
+                        continue;
+                    }
+                };
+                let input = app.input.clone();
+                let context = app
+                    .current_context
+                    .clone()
+                    .unwrap_or(dexter_core::context::FileContext {
+                        files: Vec::new(),
+                        summary: None,
+                    });
+                let llm = app.executor.llm_client().clone();
+
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let executor = Executor::new(llm);
+                    let res = executor
+                        .generate_command(&input, &context, plugin.as_ref())
+                        .await;
+                    let _ = tx.send(res);
+                });
+                app.generation_result_rx = Some(rx);
             }
             AppState::PendingDryRun => {
                 app.state = AppState::DryRunning;
-                app.run_dry_run().await?;
+                let cmd = match app.generated_command.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.state = AppState::Error("No command available for preview".to_string());
+                        continue;
+                    }
+                };
+                let plugin_name = match app.selected_plugin.clone() {
+                    Some(p) => p,
+                    None => {
+                        app.state = AppState::Error("No plugin selected".to_string());
+                        continue;
+                    }
+                };
+                let plugin = match app.plugins.iter().find(|p| p.name() == plugin_name) {
+                    Some(p) => p.clone(),
+                    None => {
+                        app.state = AppState::Error("Plugin not found".to_string());
+                        continue;
+                    }
+                };
+                let llm = app.executor.llm_client().clone();
+
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    if let Err(e) = SafetyGuard::default().check(&cmd) {
+                        let _ = tx.send(Err(anyhow!("Safety check failed: {}", e)));
+                        return;
+                    }
+                    if !plugin.validate_command(&cmd) {
+                        let _ = tx.send(Err(anyhow!(
+                            "Command failed plugin validation logic"
+                        )));
+                        return;
+                    }
+                    let res = plugin.dry_run(&cmd, Some(&llm)).await;
+                    let _ = tx.send(res);
+                });
+                app.dry_run_result_rx = Some(rx);
+            }
+            AppState::Routing => {
+                if let Some(rx) = &mut app.routing_result_rx {
+                    if let Ok(result) = rx.try_recv() {
+                        app.routing_result_rx = None;
+                        match result {
+                            Ok(plugin_name) => {
+                                app.selected_plugin = Some(plugin_name.clone());
+                                app.logs.push(format!("Routed to plugin: {}", plugin_name));
+                                app.state = AppState::PendingGeneration;
+                            }
+                            Err(e) => {
+                                app.state = AppState::Error(format!("Routing error: {}", e));
+                            }
+                        }
+                    }
+                }
+            }
+            AppState::Generating => {
+                if let Some(rx) = &mut app.generation_result_rx {
+                    if let Ok(result) = rx.try_recv() {
+                        app.generation_result_rx = None;
+                        match result {
+                            Ok(cmd) => {
+                                app.generated_command = Some(cmd.clone());
+                                app.command_draft = cmd.clone();
+                                app.logs.push(format!("Generated command: {}", cmd));
+                                app.dry_run_output = None;
+                                app.output_scroll = 0;
+                                app.state = AppState::PendingDryRun;
+                            }
+                            Err(e) => {
+                                app.state = AppState::Error(format!("Generation error: {}", e));
+                            }
+                        }
+                    }
+                }
+            }
+            AppState::DryRunning => {
+                if let Some(rx) = &mut app.dry_run_result_rx {
+                    if let Ok(result) = rx.try_recv() {
+                        app.dry_run_result_rx = None;
+                        match result {
+                            Ok(output) => {
+                                app.logs
+                                    .push("Preview data captured successfully".to_string());
+                                app.dry_run_output = Some(output);
+                                app.output_scroll = 0;
+                                app.state = AppState::AwaitingConfirmation;
+                            }
+                            Err(e) => {
+                                app.logs.push(format!("Preview failed: {}", e));
+                                app.state = AppState::Error(format!("Dry run failed: {}", e));
+                            }
+                        }
+                    }
+                }
             }
             AppState::Executing => {
                 // Check for progress updates
@@ -802,6 +866,9 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
                 app.dry_run_output = None;
                 app.output_scroll = 0;
                 app.selected_plugin = None;
+                app.routing_result_rx = None;
+                app.generation_result_rx = None;
+                app.dry_run_result_rx = None;
                 app.progress_rx = None;
                 app.execution_result_rx = None;
                 app.progress = None;
@@ -1409,26 +1476,30 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         _ => "PROCESSING",
     };
 
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!(" {} ", char), theme.processing_spinner_style),
-            Span::styled(format!("{}...", action), theme.processing_text_style),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines = vec![Line::from(""), Line::from(vec![
+        Span::styled(format!(" {} ", char), theme.processing_spinner_style),
+        Span::styled(format!("{}...", action), theme.processing_text_style),
+    ])];
 
     if let Some(prog) = &app.progress {
-        lines.push(Line::from(vec![
-            Span::styled(" STATUS: ", theme.header_subtitle_style),
-            Span::styled(&prog.message, theme.processing_text_style),
-        ]));
+        if !prog.message.trim().is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(&prog.message, theme.header_subtitle_style),
+            ]));
+        }
     } else {
-        lines.push(Line::from(Span::styled(
-            "Consulting neural pathways...",
-            theme.header_subtitle_style,
-        )));
+        let msg = match (app.tick_count / 25) % 5 {
+            0 => "Warming up the command generator...",
+            1 => "Negotiating with the API gremlins...",
+            2 => "Checking pockets for extra tokens...",
+            3 => "Applying artisanal, free-range heuristics...",
+            _ => "Holding your place in the queue...",
+        };
+        lines.push(Line::from(Span::styled(msg, theme.header_subtitle_style)));
     }
+
+    lines.push(Line::from(""));
 
     lines
 }
@@ -1454,12 +1525,22 @@ fn build_progress_gauge<'a>(app: &'a App) -> (f64, Span<'a>, Style) {
                 let r = (pct / 100.0).clamp(0.0, 1.0);
                 (r, format!("{:.0}% {}", pct, p.message))
             } else {
-                let r = ((app.tick_count % 100) as f64) / 100.0;
+                let phase = (app.tick_count % 200) as f64;
+                let r = if phase <= 100.0 {
+                    phase / 100.0
+                } else {
+                    (200.0 - phase) / 100.0
+                };
                 (r, p.message.clone())
             }
         }
         None => {
-            let r = ((app.tick_count % 100) as f64) / 100.0;
+            let phase = (app.tick_count % 200) as f64;
+            let r = if phase <= 100.0 {
+                phase / 100.0
+            } else {
+                (200.0 - phase) / 100.0
+            };
             let action = match app.state {
                 AppState::Routing | AppState::PendingRouting => "Routing",
                 AppState::Generating | AppState::PendingGeneration => "Generating",
@@ -1467,7 +1548,13 @@ fn build_progress_gauge<'a>(app: &'a App) -> (f64, Span<'a>, Style) {
                 AppState::Executing => "Executing",
                 _ => "Working",
             };
-            (r, format!("{}...", action))
+            let quip = match (app.tick_count / 20) % 4 {
+                0 => "",
+                1 => " (petting electrons)",
+                2 => " (aligning bits)",
+                _ => " (asking nicely)",
+            };
+            (r, format!("{}...{}", action, quip))
         }
     };
 

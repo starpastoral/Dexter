@@ -20,6 +20,10 @@ impl Router {
         Self { llm_client }
     }
 
+    pub fn llm_client(&self) -> &LlmClient {
+        &self.llm_client
+    }
+
     pub async fn route(
         &self,
         user_input: &str,
