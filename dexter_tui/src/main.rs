@@ -1551,14 +1551,16 @@ fn token_conveyor_belt_line(tick: u64, width: usize) -> BeltRender {
         cells[pos] = 'o';
     }
 
-    // Occasionally, a token "falls off" the belt for a few frames.
-    let drop_active = (tick % 97) < 3 && inner > 1;
+    // Occasionally, a token "falls off" the belt for a short moment.
+    //
+    // Keep it visible long enough to notice: a few hundred ms, not a few frames.
+    let drop_active = (tick % 173) < 12 && inner > 1;
     let mut dropped_col: Option<usize> = None;
     if drop_active {
-        let drop_pos = (t + 7) % inner;
-        if cells[drop_pos] == 'o' {
-            cells[drop_pos] = '-';
-        }
+        // Drop an actual token we know exists so the belt visibly changes.
+        // Tokens are at (t + i*4) % inner; pick i=2.
+        let drop_pos = (t + 8) % inner;
+        cells[drop_pos] = '-';
         // Column where the dropped token should appear (roughly aligned under the belt).
         // Format: "<L> <[belt] > <R>"
         let belt_start = left_roller.len() + 1;
