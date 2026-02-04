@@ -14,7 +14,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
     Frame, Terminal,
 };
 use std::io::{stdout, Stdout};
@@ -55,6 +57,7 @@ enum FooterAction {
     ClearInput,
     ToggleDebug,
     Quit,
+    Retry,
     Execute,
     BackToInput,
     EditCommand,
@@ -96,6 +99,9 @@ struct App {
     // Output scrolling
     output_scroll: u16,
     output_max_scroll: u16,
+    output_content_length: u16,
+    output_viewport_height: u16,
+    output_scrollbar_rect: Option<Rect>,
 
     // Async execution handling
     progress_rx: Option<mpsc::Receiver<dexter_plugins::Progress>>,
@@ -154,6 +160,9 @@ impl App {
             footer_focus: 0,
             output_scroll: 0,
             output_max_scroll: 0,
+            output_content_length: 0,
+            output_viewport_height: 0,
+            output_scrollbar_rect: None,
             progress_rx: None,
             execution_result_rx: None,
             progress: None,
@@ -389,7 +398,6 @@ async fn run_app(
     let _ = app.update_context().await;
 
     loop {
-        terminal.draw(|f| ui(f, app))?;
         app.tick_count += 1;
 
         // Non-blocking automatic state transitions
@@ -444,6 +452,8 @@ async fn run_app(
 
         // Keep output scrolling bounds in sync with current terminal size/content.
         update_output_scroll_bounds(terminal, app)?;
+
+        terminal.draw(|f| ui(f, app))?;
 
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
@@ -679,6 +689,13 @@ async fn run_app(
                             _ => {}
                         },
                         AppState::Finished(_) | AppState::Error(_) => match key.code {
+                            KeyCode::Char('r') => {
+                                let should_quit =
+                                    perform_footer_action(app, FooterAction::Retry).await?;
+                                if should_quit {
+                                    return Ok(());
+                                }
+                            }
                             KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => {
                                 let should_quit =
                                     perform_footer_action(app, FooterAction::ResetToInput).await?;
@@ -706,32 +723,54 @@ async fn run_app(
                     MouseEventKind::ScrollDown => {
                         app.output_scroll = app.output_scroll.saturating_add(3);
                     }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        // Click footer buttons if mouse is within the rect.
-                        let mut clicked_button = false;
-                        for (idx, btn) in app.footer_buttons.iter().enumerate() {
-                            if mouse.column >= btn.rect.x
-                                && mouse.column < btn.rect.x + btn.rect.width
-                                && mouse.row >= btn.rect.y
-                                && mouse.row < btn.rect.y + btn.rect.height
+                    MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Down(MouseButton::Left) => {
+                        // If the scrollbar is visible, allow clicking/dragging it to jump.
+                        if let Some(sb) = app.output_scrollbar_rect {
+                            if app.output_max_scroll > 0
+                                && mouse.column >= sb.x
+                                && mouse.column < sb.x + sb.width
+                                && mouse.row >= sb.y
+                                && mouse.row < sb.y + sb.height
                             {
-                                app.focus = FocusArea::FooterButtons;
-                                app.footer_focus = idx;
-                                let should_quit =
-                                    perform_footer_action(app, btn.action).await?;
-                                if should_quit {
-                                    return Ok(());
-                                }
-                                clicked_button = true;
-                                break;
+                                let track_h = sb.height.max(1);
+                                let rel = mouse.row.saturating_sub(sb.y).min(track_h - 1);
+                                let denom = track_h.saturating_sub(1).max(1) as u32;
+                                let new_scroll = ((rel as u32) * (app.output_max_scroll as u32)
+                                    / denom) as u16;
+                                app.output_scroll = new_scroll.min(app.output_max_scroll);
+                                continue;
                             }
                         }
 
-                        // Convenience: click anywhere else to focus the proposal editor.
-                        if !clicked_button
-                            && matches!(app.state, AppState::Input | AppState::EditingCommand)
-                        {
-                            app.focus = FocusArea::Proposal;
+                        // Otherwise, treat it as a click on the button bar (if any) or focus change.
+                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                            // Click footer buttons if mouse is within the rect.
+                            let mut clicked_button = false;
+                            for (idx, btn) in app.footer_buttons.iter().enumerate() {
+                                if mouse.column >= btn.rect.x
+                                    && mouse.column < btn.rect.x + btn.rect.width
+                                    && mouse.row >= btn.rect.y
+                                    && mouse.row < btn.rect.y + btn.rect.height
+                                {
+                                    app.focus = FocusArea::FooterButtons;
+                                    app.footer_focus = idx;
+                                    let should_quit =
+                                        perform_footer_action(app, btn.action).await?;
+                                    if should_quit {
+                                        return Ok(());
+                                    }
+                                    clicked_button = true;
+                                    break;
+                                }
+                            }
+
+                            // Convenience: click anywhere else to focus the proposal editor.
+                            if !clicked_button
+                                && matches!(app.state, AppState::Input | AppState::EditingCommand)
+                            {
+                                app.focus = FocusArea::Proposal;
+                            }
                         }
                     }
                     _ => {}
@@ -751,6 +790,25 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
                 "Debug Mode: {}",
                 if app.show_debug { "ON" } else { "OFF" }
             ));
+        }
+        FooterAction::Retry => {
+            // Retry from the last user input, restarting the routing -> generation -> preview flow.
+            if app.input.trim().is_empty() {
+                app.state = AppState::Input;
+                app.focus = FocusArea::Proposal;
+            } else {
+                app.generated_command = None;
+                app.command_draft.clear();
+                app.dry_run_output = None;
+                app.output_scroll = 0;
+                app.selected_plugin = None;
+                app.progress_rx = None;
+                app.execution_result_rx = None;
+                app.progress = None;
+                app.focus = FocusArea::FooterButtons;
+                app.footer_focus = 0;
+                app.state = AppState::PendingRouting;
+            }
         }
         FooterAction::ClearInput => {
             app.input.clear();
@@ -974,8 +1032,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_button_bar(f, app, main_layout[2]);
 
     // --- SECTION 4: OUTPUT (PREVIEW / LOGS / STATUS) + OPTIONAL SCROLLBAR ---
-    let (output_title, output_content) = build_output_view(app);
-    let output_line_count = output_content.len() as u16;
+    let output_title = output_title(app);
     let output_block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
@@ -983,32 +1040,65 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_widget(&output_block, main_layout[3]);
 
     let inner = output_block.inner(main_layout[3]);
-    let viewport_height = inner.height;
-    let local_max_scroll = output_line_count.saturating_sub(viewport_height);
-    let effective_scroll = app.output_scroll.min(local_max_scroll);
 
-    let show_scrollbar = local_max_scroll > 0 && inner.width > 1 && inner.height > 0;
-    let mut text_area = inner;
+    // Optional progress gauge (native ratatui widget) shown in the output box.
+    let show_gauge = should_show_progress_gauge(app) && inner.height > 1;
+    let (gauge_rect, text_region) = if show_gauge {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(inner);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, inner)
+    };
+    app.output_viewport_height = text_region.height;
+
+    if let Some(r) = gauge_rect {
+        let (ratio, label, gauge_style) = build_progress_gauge(app);
+        let gauge = Gauge::default()
+            .ratio(ratio)
+            .label(label)
+            .style(app.theme.base_style)
+            .gauge_style(gauge_style);
+        f.render_widget(gauge, r);
+    }
+
+    let show_scrollbar =
+        app.output_max_scroll > 0 && text_region.width > 1 && text_region.height > 0;
+    app.output_scrollbar_rect = if show_scrollbar {
+        Some(Rect {
+            x: text_region.x + text_region.width - 1,
+            y: text_region.y,
+            width: 1,
+            height: text_region.height,
+        })
+    } else {
+        None
+    };
+
+    let mut text_area = text_region;
     if show_scrollbar {
         text_area.width = text_area.width.saturating_sub(1);
     }
 
+    let output_content = build_output_lines(app);
+    let output_line_count = output_content.len() as u16;
     let output_para = Paragraph::new(output_content)
         .style(block_style)
         .wrap(Wrap { trim: false })
-        .scroll((effective_scroll, 0));
+        .scroll((app.output_scroll, 0));
     f.render_widget(output_para, text_area);
 
     if show_scrollbar {
         let content_len = output_line_count.max(1) as usize;
-        let viewport_len = viewport_height as usize;
-        let mut scrollbar_state = ScrollbarState::new(content_len)
-            .position(effective_scroll as usize)
-            .viewport_content_length(viewport_len);
+        let mut scrollbar_state =
+            ScrollbarState::new(content_len).position(app.output_scroll as usize);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(app.theme.border_style)
             .track_style(app.theme.base_style);
-        f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+        // Render scrollbar only for the text region (so it doesn't overlap the progress gauge).
+        f.render_stateful_widget(scrollbar, text_region, &mut scrollbar_state);
     }
 
     // --- SECTION 5: FOOTER (MODE/MODEL/PROVIDER) ---
@@ -1136,6 +1226,7 @@ fn footer_buttons_for_state(app: &App) -> Vec<(FooterAction, String)> {
             (FooterAction::Quit, "QUIT".to_string()),
         ],
         AppState::Finished(_) | AppState::Error(_) => vec![
+            (FooterAction::Retry, "RETRY".to_string()),
             (FooterAction::ResetToInput, "BACK".to_string()),
             (FooterAction::Quit, "QUIT".to_string()),
         ],
@@ -1178,29 +1269,50 @@ fn render_multiline_prompt<'a>(
 }
 
 fn build_output_view<'a>(app: &'a App) -> (&'static str, Vec<Line<'a>>) {
+    (output_title(app), build_output_lines(app))
+}
+
+fn output_title(app: &App) -> &'static str {
     if app.show_debug {
-        return (" DEBUG_SYSTEM_INTERNAL ", render_debug(app, &app.theme));
+        return " DEBUG_SYSTEM_INTERNAL ";
     }
 
     match &app.state {
-        AppState::Input => (" SYSTEM STATUS & LOGS ", render_input_view(app, &app.theme)),
+        AppState::Input => " SYSTEM STATUS & LOGS ",
         AppState::Routing
         | AppState::Generating
         | AppState::Executing
         | AppState::DryRunning
         | AppState::PendingRouting
         | AppState::PendingGeneration
-        | AppState::PendingDryRun => (" PROCESSING ", render_processing_view(app, &app.theme)),
-        AppState::AwaitingConfirmation => (
-            " PREVIEW / CONFIRMATION ",
-            render_preview_view(app, &app.theme),
-        ),
-        AppState::EditingCommand => (" EDIT COMMAND ", render_edit_command_view(app, &app.theme)),
-        AppState::Finished(out) => (
-            " EXECUTION RESULTS ",
-            render_finished_view(out, app.selected_plugin.as_deref(), &app.theme),
-        ),
-        AppState::Error(e) => (" SYSTEM FAILURE ", render_error_view(e, &app.theme)),
+        | AppState::PendingDryRun => " PROCESSING ",
+        AppState::AwaitingConfirmation => " PREVIEW / CONFIRMATION ",
+        AppState::EditingCommand => " EDIT COMMAND ",
+        AppState::Finished(_) => " EXECUTION RESULTS ",
+        AppState::Error(_) => " SYSTEM FAILURE ",
+    }
+}
+
+fn build_output_lines<'a>(app: &'a App) -> Vec<Line<'a>> {
+    if app.show_debug {
+        return render_debug(app, &app.theme);
+    }
+
+    match &app.state {
+        AppState::Input => render_input_view(app, &app.theme),
+        AppState::Routing
+        | AppState::Generating
+        | AppState::Executing
+        | AppState::DryRunning
+        | AppState::PendingRouting
+        | AppState::PendingGeneration
+        | AppState::PendingDryRun => render_processing_view(app, &app.theme),
+        AppState::AwaitingConfirmation => render_preview_view(app, &app.theme),
+        AppState::EditingCommand => render_edit_command_view(app, &app.theme),
+        AppState::Finished(out) => {
+            render_finished_view(out, app.selected_plugin.as_deref(), &app.theme)
+        }
+        AppState::Error(e) => render_error_view(e, &app.theme),
     }
 }
 
@@ -1311,19 +1423,6 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
             Span::styled(" STATUS: ", theme.header_subtitle_style),
             Span::styled(&prog.message, theme.processing_text_style),
         ]));
-
-        if let Some(pct) = prog.percentage {
-            // Simple text-based bar if we have percentage
-            let width: usize = 40;
-            let filled = (pct / 100.0 * width as f64) as usize;
-            let bar = format!(
-                "[{}{}] {:.1}%",
-                "=".repeat(filled),
-                "-".repeat(width.saturating_sub(filled)),
-                pct
-            );
-            lines.push(Line::from(Span::styled(bar, theme.processing_text_style)));
-        }
     } else {
         lines.push(Line::from(Span::styled(
             "Consulting neural pathways...",
@@ -1332,6 +1431,49 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     }
 
     lines
+}
+
+fn should_show_progress_gauge(app: &App) -> bool {
+    matches!(
+        app.state,
+        AppState::Routing
+            | AppState::Generating
+            | AppState::Executing
+            | AppState::DryRunning
+            | AppState::PendingRouting
+            | AppState::PendingGeneration
+            | AppState::PendingDryRun
+    )
+}
+
+fn build_progress_gauge<'a>(app: &'a App) -> (f64, Span<'a>, Style) {
+    // Prefer a real percentage if the plugin provides one. Otherwise, show an animated bar.
+    let (ratio, label) = match &app.progress {
+        Some(p) => {
+            if let Some(pct) = p.percentage {
+                let r = (pct / 100.0).clamp(0.0, 1.0);
+                (r, format!("{:.0}% {}", pct, p.message))
+            } else {
+                let r = ((app.tick_count % 100) as f64) / 100.0;
+                (r, p.message.clone())
+            }
+        }
+        None => {
+            let r = ((app.tick_count % 100) as f64) / 100.0;
+            let action = match app.state {
+                AppState::Routing | AppState::PendingRouting => "Routing",
+                AppState::Generating | AppState::PendingGeneration => "Generating",
+                AppState::DryRunning | AppState::PendingDryRun => "Previewing",
+                AppState::Executing => "Executing",
+                _ => "Working",
+            };
+            (r, format!("{}...", action))
+        }
+    };
+
+    // Use a strong filled style so it reads well across themes.
+    let gauge_style = app.theme.footer_key_style;
+    (ratio, Span::styled(label, app.theme.header_subtitle_style), gauge_style)
 }
 
 fn render_preview_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
@@ -1523,9 +1665,17 @@ fn update_output_scroll_bounds(
         ])
         .split(area);
 
-    let output_viewport_height = main_layout[3].height.saturating_sub(2); // subtract borders
+    let output_inner_height = main_layout[3].height.saturating_sub(2); // subtract borders
+    let gauge_height = if should_show_progress_gauge(app) && output_inner_height > 1 {
+        1
+    } else {
+        0
+    };
+    let output_viewport_height = output_inner_height.saturating_sub(gauge_height);
     let (_, lines) = build_output_view(app);
     let line_count = lines.len() as u16;
+    app.output_content_length = line_count;
+    app.output_viewport_height = output_viewport_height;
 
     let max_scroll = line_count.saturating_sub(output_viewport_height);
     app.output_max_scroll = max_scroll;
