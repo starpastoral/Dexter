@@ -97,6 +97,7 @@ struct App {
     // Output scrolling
     output_scroll: u16,
     output_max_scroll: u16,
+    output_text_width: u16,
     output_scrollbar_rect: Option<Rect>,
 
     // Async execution handling
@@ -159,6 +160,7 @@ impl App {
             footer_focus: 0,
             output_scroll: 0,
             output_max_scroll: 0,
+            output_text_width: 0,
             output_scrollbar_rect: None,
             routing_result_rx: None,
             generation_result_rx: None,
@@ -1001,6 +1003,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // --- SECTION 2: PROPOSAL (OR INPUT/INTENT) ---
     let (proposal_title, proposal_content) = match app.state {
         AppState::Input => {
+            let cursor_visible = app.focus == FocusArea::Proposal && (app.tick_count / 8) % 2 == 0;
             let mut lines = vec![Line::from("")];
             lines.extend(render_multiline_prompt(
                 &app.input,
@@ -1008,6 +1011,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Span::styled("   ", app.theme.input_prompt_style),
                 app.theme.input_text_style,
                 Some(app.theme.input_cursor_style),
+                cursor_visible,
             ));
             (" USER INPUT ", lines)
         }
@@ -1018,12 +1022,14 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .proposal_cmd_style
                 .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::RAPID_BLINK);
+            let cursor_visible = app.focus == FocusArea::Proposal && (app.tick_count / 8) % 2 == 0;
             lines.extend(render_multiline_prompt(
                 &app.command_draft,
                 Span::styled(" > ", app.theme.header_subtitle_style),
                 Span::styled("   ", app.theme.header_subtitle_style),
                 app.theme.proposal_cmd_style,
                 Some(cmd_cursor),
+                cursor_visible,
             ));
             (" EDIT COMMAND ", lines)
         }
@@ -1040,6 +1046,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     Span::styled("   ", app.theme.header_subtitle_style),
                     app.theme.header_subtitle_style,
                     None,
+                    false,
                 ));
                 lines
             },
@@ -1056,6 +1063,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                             Span::styled("   ", app.theme.header_subtitle_style),
                             app.theme.proposal_cmd_style,
                             None,
+                            false,
                         ));
                         lines
                     },
@@ -1071,6 +1079,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                             Span::styled("   ", app.theme.error_style),
                             app.theme.error_style,
                             None,
+                            false,
                         ));
                         lines
                     },
@@ -1277,6 +1286,7 @@ fn render_multiline_prompt<'a>(
     continuation_prefix: Span<'a>,
     text_style: Style,
     cursor_style: Option<Style>,
+    cursor_visible: bool,
 ) -> Vec<Line<'a>> {
     let mut out = Vec::new();
     let mut parts: Vec<&str> = text.split('\n').collect();
@@ -1295,7 +1305,10 @@ fn render_multiline_prompt<'a>(
         let mut spans = vec![prefix, Span::styled(*line, text_style)];
         if is_last {
             if let Some(cursor_style) = cursor_style {
-                spans.push(Span::styled("_", cursor_style));
+                if cursor_visible {
+                    // Block cursor: a styled space cell.
+                    spans.push(Span::styled(" ", cursor_style));
+                }
             }
         }
         out.push(Line::from(spans));
@@ -1444,73 +1457,164 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         _ => "PROCESSING",
     };
 
-    let mut lines = vec![
+    let belt_w = app.output_text_width.max(10) as usize;
+    let belt = token_conveyor_belt_line(app.tick_count, belt_w);
+
+    let quip = if let Some(prog) = &app.progress {
+        let msg = prog.message.trim();
+        if !msg.is_empty() {
+            msg.to_string()
+        } else {
+            processing_quip(app.tick_count, belt.bounce_count)
+        }
+    } else if belt.dropped {
+        // Guaranteed to line up: we compute drop + message in the same frame.
+        match (app.tick_count / 10) % 3 {
+            0 => "One token escaped.".to_string(),
+            1 => "A token fell off the belt. We'll pretend it's fine.".to_string(),
+            _ => "Token down. Morale up.".to_string(),
+        }
+    } else {
+        processing_quip(app.tick_count, belt.bounce_count)
+    };
+
+    let quip_line = if let Some(col) = belt.dropped_col {
+        // A dropped token falls into the status line. Still one line of copy.
+        format!("{:width$}o  {}", "", quip, width = col)
+    } else {
+        quip
+    };
+
+    vec![
         Line::from(""),
         Line::from(vec![
             Span::styled(format!(" {} ", char), theme.processing_spinner_style),
             Span::styled(format!("{}...", action), theme.processing_text_style),
         ]),
-        Line::from(Span::styled(
-            ai_thinking_animation(app.tick_count, action),
-            theme.header_subtitle_style,
-        )),
-    ];
-
-    if let Some(prog) = &app.progress {
-        if !prog.message.trim().is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled(&prog.message, theme.header_subtitle_style),
-            ]));
-        }
-    } else {
-        let msg = match (app.tick_count / 25) % 5 {
-            0 => "Warming up the command generator (no caffeine detected).",
-            1 => "Negotiating with the API gremlins (politely).",
-            2 => "Checking pockets for extra tokens (lint-free).",
-            3 => "Applying artisanal, free-range heuristics.",
-            _ => "Holding your place in the queue. Please enjoy the silence.",
-        };
-        lines.push(Line::from(Span::styled(msg, theme.header_subtitle_style)));
-    }
-
-    lines.push(Line::from(""));
-
-    lines
+        Line::from(Span::styled(belt.line, theme.header_subtitle_style)),
+        Line::from(Span::styled(quip_line, theme.header_subtitle_style)),
+        Line::from(""),
+    ]
 }
 
-fn ai_thinking_animation(tick: u64, action: &str) -> String {
-    // A tiny, intentionally low-stakes animation for "AI is working".
-    //
-    // Example:
-    //   LLM CORE: [....@...........] (SYNTHESIZING COMMAND)
-    let width: usize = 22;
+struct BeltRender {
+    line: String,
+    dropped_col: Option<usize>,
+    dropped: bool,
+    bounce_count: u64,
+}
+
+fn token_conveyor_belt_line(tick: u64, width: usize) -> BeltRender {
+    // ASCII-only "token conveyor belt". Designed to fill the whole line so it doesn't wrap.
+    // Example: "(|) [o---o----o---o---] (/)"
+    let w = width.max(10);
+
+    // If terminal is too narrow, keep it compact and skip the rollers.
+    if w < 16 {
+        let inner = w.saturating_sub(2).max(1);
+        let mut cells: Vec<char> = vec!['-'; inner];
+        let t = (tick / 2) as usize;
+        let n_tokens = 3usize.min(inner.max(1));
+        for i in 0..n_tokens {
+            let pos = (t + i * 3) % inner;
+            cells[pos] = 'o';
+        }
+        let mut s = String::with_capacity(w);
+        s.push('[');
+        for c in cells {
+            s.push(c);
+        }
+        s.push(']');
+        return BeltRender {
+            line: s,
+            dropped_col: None,
+            dropped: false,
+            bounce_count: 0,
+        };
+    }
+
+    let roller_frames = ['|', '/', '-', '\\'];
+    let left = roller_frames[((tick / 2) as usize) % roller_frames.len()];
+    let right = roller_frames[(((tick / 2) as usize) + 2) % roller_frames.len()];
+    let left_roller = format!("({})", left);
+    let right_roller = format!("({})", right);
+
+    let overhead = left_roller.len() + 1 + 1 + right_roller.len(); // "L <belt> R"
+    let belt_len = w.saturating_sub(overhead).max(4);
+    let inner = belt_len.saturating_sub(2).max(1);
+
     let t = (tick / 2) as usize;
-    let period = (width.saturating_sub(1)).max(1);
+    let mut cells: Vec<char> = vec!['-'; inner];
+    let n_tokens = 5usize.min(inner.max(1));
+    for i in 0..n_tokens {
+        let pos = (t + i * 4) % inner;
+        cells[pos] = 'o';
+    }
+
+    // Occasionally, a token "falls off" the belt for a few frames.
+    let drop_active = (tick % 97) < 3 && inner > 1;
+    let mut dropped_col: Option<usize> = None;
+    if drop_active {
+        let drop_pos = (t + 7) % inner;
+        if cells[drop_pos] == 'o' {
+            cells[drop_pos] = '-';
+        }
+        // Column where the dropped token should appear (roughly aligned under the belt).
+        // Format: "<L> <[belt] > <R>"
+        let belt_start = left_roller.len() + 1;
+        dropped_col = Some(belt_start + 1 + drop_pos);
+    }
+
+    // "Cart" token that bounces end-to-end; use it to set a rhythmic quip cadence.
+    let period = inner.saturating_sub(1).max(1);
+    let bounce_count = (t / period) as u64;
     let phase = t % (period * 2);
-    let pos = if phase <= period {
+    let cart_pos = if phase <= period {
         phase
     } else {
         (period * 2) - phase
     };
-
-    let mut bar = String::with_capacity(width);
-    for i in 0..width {
-        if i == pos {
-            bar.push('@');
-        } else {
-            bar.push('.');
-        }
+    if cart_pos < inner {
+        cells[cart_pos] = 'O';
     }
 
-    let aside = match (tick / 40) % 4 {
-        0 => "Listening for vibes",
-        1 => "Asking the model nicely",
-        2 => "Summoning plausible syntax",
-        _ => "Definitely not guessing",
-    };
+    let mut belt = String::with_capacity(belt_len);
+    belt.push('[');
+    for c in cells {
+        belt.push(c);
+    }
+    belt.push(']');
 
-    format!("LLM CORE: [{}] ({}, {})", bar, action, aside)
+    let line = format!("{} {} {}", left_roller, belt, right_roller);
+    BeltRender {
+        line,
+        dropped_col,
+        dropped: drop_active,
+        bounce_count,
+    }
+}
+
+fn processing_quip(tick: u64, bounce_count: u64) -> String {
+    // Prefer cadence over chatter: rotate copy only when the cart hits an end.
+    // That makes it feel intentional rather than "every N ms".
+    let idx = (bounce_count as usize) % 6;
+    match idx {
+        0 => "Applying artisanal, free-range heuristics.".to_string(),
+        1 => "Consulting the manual (it is blank).".to_string(),
+        2 => "Counting tokens by hand. Again.".to_string(),
+        3 => "Gently discouraging hallucinations.".to_string(),
+        4 => "Assembling a command with 100% confidence (±100%).".to_string(),
+        _ => {
+            // Slow blink on the ellipsis for a tiny bit of extra rhythm.
+            let dots = match (tick / 10) % 4 {
+                0 => ".",
+                1 => "..",
+                2 => "...",
+                _ => "....",
+            };
+            format!("Staying calm{} (mostly).", dots)
+        }
+    }
 }
 
 fn render_preview_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
@@ -1703,6 +1807,9 @@ fn update_output_scroll_bounds(
         .split(area);
 
     let output_viewport_height = main_layout[3].height.saturating_sub(2); // subtract borders
+    let output_inner_width = main_layout[3].width.saturating_sub(2); // subtract borders
+    // Leave 1 column slack so the animation doesn't wrap when the scrollbar appears.
+    app.output_text_width = output_inner_width.saturating_sub(1);
     let (_, lines) = build_output_view(app);
     let line_count = lines.len() as u16;
 

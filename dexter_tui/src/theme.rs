@@ -64,7 +64,8 @@ impl Theme {
             input_prompt_style: Style::default().fg(amber).add_modifier(Modifier::BOLD),
             input_text_style: Style::default().fg(Color::White),
             input_cursor_style: Style::default()
-                .fg(amber)
+                .bg(amber)
+                .fg(bg)
                 .add_modifier(Modifier::RAPID_BLINK),
 
             proposal_cmd_style: Style::default().bg(amber).fg(bg),
@@ -101,7 +102,8 @@ impl Theme {
             input_prompt_style: Style::default().fg(accent).add_modifier(Modifier::BOLD),
             input_text_style: Style::default().fg(accent),
             input_cursor_style: Style::default()
-                .fg(accent)
+                .bg(accent)
+                .fg(Color::White)
                 .add_modifier(Modifier::RAPID_BLINK),
 
             proposal_cmd_style: Style::default().bg(accent).fg(Color::White),
