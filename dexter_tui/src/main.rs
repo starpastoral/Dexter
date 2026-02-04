@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::io::{stdout, Stdout};
@@ -69,7 +69,6 @@ enum FooterAction {
 struct FooterButton {
     rect: Rect,
     action: FooterAction,
-    label: String,
 }
 
 struct App {
@@ -330,7 +329,7 @@ async fn main() -> Result<()> {
     }
 
     // Mouse support enables clickable "buttons" in the footer.
-    let mut mouse_capture_enabled = execute!(stdout, EnableMouseCapture).is_ok();
+    let mouse_capture_enabled = execute!(stdout, EnableMouseCapture).is_ok();
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -854,8 +853,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3), // 1. Title/Header
             Constraint::Length(5), // 2. Proposal
-            Constraint::Min(1),    // 3. Output
-            Constraint::Length(4), // 4. Footer
+            Constraint::Length(1), // 3. Buttons
+            Constraint::Min(1),    // 4. Output
+            Constraint::Length(2), // 5. Footer (MODE/MODEL/PROVIDER)
         ])
         .split(f.area());
 
@@ -970,33 +970,55 @@ fn ui(f: &mut Frame, app: &mut App) {
         );
     f.render_widget(proposal_block, main_layout[1]);
 
-    // --- SECTION 3: OUTPUT (PREVIEW / LOGS / STATUS) ---
+    // --- SECTION 3: BUTTON BAR (INTERACTIVE) ---
+    render_button_bar(f, app, main_layout[2]);
+
+    // --- SECTION 4: OUTPUT (PREVIEW / LOGS / STATUS) + OPTIONAL SCROLLBAR ---
     let (output_title, output_content) = build_output_view(app);
+    let output_line_count = output_content.len() as u16;
+    let output_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(output_title, app.theme.header_title_style));
+    f.render_widget(&output_block, main_layout[3]);
 
-    let output_block = Paragraph::new(output_content)
+    let inner = output_block.inner(main_layout[3]);
+    let viewport_height = inner.height;
+    let local_max_scroll = output_line_count.saturating_sub(viewport_height);
+    let effective_scroll = app.output_scroll.min(local_max_scroll);
+
+    let show_scrollbar = local_max_scroll > 0 && inner.width > 1 && inner.height > 0;
+    let mut text_area = inner;
+    if show_scrollbar {
+        text_area.width = text_area.width.saturating_sub(1);
+    }
+
+    let output_para = Paragraph::new(output_content)
+        .style(block_style)
         .wrap(Wrap { trim: false })
-        .scroll((app.output_scroll, 0))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(Span::styled(output_title, app.theme.header_title_style)),
-        );
-    f.render_widget(output_block, main_layout[2]);
+        .scroll((effective_scroll, 0));
+    f.render_widget(output_para, text_area);
 
-    // --- SECTION 4: FOOTER ---
+    if show_scrollbar {
+        let content_len = output_line_count.max(1) as usize;
+        let viewport_len = viewport_height as usize;
+        let mut scrollbar_state = ScrollbarState::new(content_len)
+            .position(effective_scroll as usize)
+            .viewport_content_length(viewport_len);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(app.theme.border_style)
+            .track_style(app.theme.base_style);
+        f.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+    }
+
+    // --- SECTION 5: FOOTER (MODE/MODEL/PROVIDER) ---
     let state_name = format!("{:?}", app.state).to_uppercase();
     let provider_name = get_provider_name(&app.config);
     let footer_block = Block::default()
         .borders(Borders::TOP)
         .border_style(border_style);
-    f.render_widget(&footer_block, main_layout[3]);
-    let footer_inner = footer_block.inner(main_layout[3]);
-
-    let footer_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(footer_inner);
+    f.render_widget(&footer_block, main_layout[4]);
+    let footer_inner = footer_block.inner(main_layout[4]);
 
     let line1 = Line::from(vec![
         Span::styled(" MODE: ", app.theme.footer_text_style),
@@ -1010,44 +1032,15 @@ fn ui(f: &mut Frame, app: &mut App) {
         Span::styled(&provider_name, app.theme.footer_highlight_style),
     ]);
 
-    let focus_label = match (&app.state, app.focus) {
-        (AppState::EditingCommand, FocusArea::Proposal) => "COMMAND",
-        (AppState::Input, FocusArea::Proposal) => "INPUT",
-        (AppState::Input, FocusArea::FooterButtons) => "BUTTONS",
-        (AppState::EditingCommand, FocusArea::FooterButtons) => "BUTTONS",
-        (_, FocusArea::FooterButtons) => "BUTTONS",
-        (_, FocusArea::Proposal) => "INPUT",
-    };
+    let info = Paragraph::new(vec![line1]).style(block_style);
+    f.render_widget(info, footer_inner);
+}
 
-    let hint = match (&app.state, app.focus) {
-        (AppState::Input, FocusArea::Proposal) => {
-            "Tab: Buttons | Enter: New line | Up/Down: Scroll output"
-        }
-        (AppState::Input, FocusArea::FooterButtons) => {
-            "Tab: Input | Left/Right: Select | Enter: Activate | Up/Down: Scroll output"
-        }
-        (AppState::EditingCommand, FocusArea::Proposal) => {
-            "Tab: Buttons | Ctrl+Enter/Ctrl+D: Preview | Up/Down: Scroll output"
-        }
-        (AppState::EditingCommand, FocusArea::FooterButtons) => {
-            "Tab: Command | Left/Right: Select | Enter: Activate | Up/Down: Scroll output"
-        }
-        _ => "Left/Right: Select | Enter: Activate | Up/Down: Scroll output",
-    };
-
-    let line2 = Line::from(vec![
-        Span::styled(" FOCUS: ", app.theme.footer_text_style),
-        Span::styled(focus_label, app.theme.footer_highlight_style),
-        Span::styled("  ", Style::default()),
-        Span::styled(hint, app.theme.footer_text_style),
-    ]);
-
-    let info = Paragraph::new(vec![line1, line2]).style(block_style);
-    f.render_widget(info, footer_layout[0]);
-
-    // Button bar
+fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
+    // Reuse existing button rendering (with mouse hitboxes), but position the bar
+    // between the input and output panes per the new UI layout.
     let specs = footer_buttons_for_state(app);
-    if specs.is_empty() {
+    if specs.is_empty() || area.height == 0 || area.width == 0 {
         app.footer_buttons.clear();
         app.footer_focus = 0;
         if app.focus == FocusArea::FooterButtons {
@@ -1058,11 +1051,6 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     if app.footer_focus >= specs.len() {
         app.footer_focus = 0;
-    }
-
-    if footer_layout[1].height == 0 || footer_layout[1].width == 0 {
-        app.footer_buttons.clear();
-        return;
     }
 
     let mut display_texts: Vec<String> = Vec::with_capacity(specs.len());
@@ -1079,7 +1067,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Horizontal)
         .constraints(constraints)
         .spacing(1)
-        .split(footer_layout[1]);
+        .split(area);
 
     app.footer_buttons.clear();
     for (i, rect) in button_rects.iter().enumerate() {
@@ -1097,7 +1085,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         app.footer_buttons.push(FooterButton {
             rect: *rect,
             action,
-            label: text,
         });
     }
 }
@@ -1530,16 +1517,15 @@ fn update_output_scroll_bounds(
         .constraints([
             Constraint::Length(3), // 1. Title/Header
             Constraint::Length(5), // 2. Proposal
-            Constraint::Min(1),    // 3. Output
-            Constraint::Length(4), // 4. Footer
+            Constraint::Length(1), // 3. Buttons
+            Constraint::Min(1),    // 4. Output
+            Constraint::Length(2), // 5. Footer
         ])
         .split(area);
 
-    let output_viewport_height = main_layout[2].height.saturating_sub(2); // subtract borders
-    let line_count = {
-        let (_, lines) = build_output_view(app);
-        lines.len() as u16
-    };
+    let output_viewport_height = main_layout[3].height.saturating_sub(2); // subtract borders
+    let (_, lines) = build_output_view(app);
+    let line_count = lines.len() as u16;
 
     let max_scroll = line_count.saturating_sub(output_viewport_height);
     app.output_max_scroll = max_scroll;
