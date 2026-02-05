@@ -1,9 +1,11 @@
 pub mod f2;
 pub mod ffmpeg;
+pub mod pandoc;
 pub mod ytdlp;
 
 pub use f2::F2Plugin;
 pub use ffmpeg::FFmpegPlugin;
+pub use pandoc::PandocPlugin;
 pub use ytdlp::YtDlpPlugin;
 
 use anyhow::Result;
