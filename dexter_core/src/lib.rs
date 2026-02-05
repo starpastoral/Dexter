@@ -2,6 +2,7 @@ pub use config::Config;
 pub use llm::LlmClient;
 pub use context::{ContextScanner, FileContext};
 pub use router::Router;
+pub use router::{ClarifyOption, ClarifySource, RouteOutcome};
 pub use safety::SafetyGuard;
 pub use executor::Executor;
 

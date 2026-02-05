@@ -8,7 +8,9 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use dexter_core::{Config, ContextScanner, Executor, LlmClient, Router, SafetyGuard};
+use dexter_core::{
+    ClarifyOption, Config, ContextScanner, Executor, LlmClient, RouteOutcome, Router, SafetyGuard,
+};
 use dexter_plugins::{F2Plugin, FFmpegPlugin, PandocPlugin, Plugin, PreviewContent, YtDlpPlugin};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -36,6 +38,7 @@ enum AppState {
     Executing,
     Finished(String),
     Error(String),
+    Clarifying,
     // New states for non-blocking execution flow
     PendingRouting,
     PendingGeneration,
@@ -64,6 +67,7 @@ enum FooterAction {
     PreviewEditedCommand,
     CancelEditCommand,
     ResetToInput,
+    ClarifySelect(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +92,8 @@ struct App {
     show_debug: bool,
     config: Config,
     theme: Theme,
+    notice: Option<String>,
+    clarify: Option<ClarifyPayload>,
 
     // Focus + interactive footer buttons
     focus: FocusArea,
@@ -101,12 +107,18 @@ struct App {
     output_scrollbar_rect: Option<Rect>,
 
     // Async execution handling
-    routing_result_rx: Option<oneshot::Receiver<Result<String>>>,
+    routing_result_rx: Option<oneshot::Receiver<Result<RouteOutcome>>>,
     generation_result_rx: Option<oneshot::Receiver<Result<String>>>,
     dry_run_result_rx: Option<oneshot::Receiver<Result<PreviewContent>>>,
     progress_rx: Option<mpsc::Receiver<dexter_plugins::Progress>>,
     execution_result_rx: Option<oneshot::Receiver<Result<String>>>,
     progress: Option<dexter_plugins::Progress>,
+}
+
+#[derive(Clone, Debug)]
+struct ClarifyPayload {
+    question: String,
+    options: Vec<ClarifyOption>,
 }
 
 impl App {
@@ -156,6 +168,8 @@ impl App {
             show_debug: false,
             config,
             theme,
+            notice: None,
+            clarify: None,
             focus: FocusArea::Proposal,
             footer_buttons: Vec::new(),
             footer_focus: 0,
@@ -423,11 +437,31 @@ async fn run_app(
                     if let Ok(result) = rx.try_recv() {
                         app.routing_result_rx = None;
                         match result {
-                            Ok(plugin_name) => {
-                                app.selected_plugin = Some(plugin_name.clone());
-                                app.logs.push(format!("Routed to plugin: {}", plugin_name));
-                                app.state = AppState::PendingGeneration;
-                            }
+                            Ok(outcome) => match outcome {
+                                RouteOutcome::Selected { plugin, .. } => {
+                                    app.selected_plugin = Some(plugin.clone());
+                                    app.logs.push(format!("Routed to plugin: {}", plugin));
+                                    app.state = AppState::PendingGeneration;
+                                }
+                                RouteOutcome::Unsupported { reason } => {
+                                    app.notice = Some(format!(
+                                        "This request isn’t supported.\n{}\nTry: convert formats or rename files (rename only, no conversion).",
+                                        reason
+                                    ));
+                                    app.logs.push("Routing result: unsupported request".to_string());
+                                    app.state = AppState::Input;
+                                    app.focus = FocusArea::Proposal;
+                                    app.footer_focus = 0;
+                                }
+                                RouteOutcome::Clarify { question, options, .. } => {
+                                    app.clarify = Some(ClarifyPayload { question, options });
+                                    app.notice = None;
+                                    app.logs.push("Routing requires clarification".to_string());
+                                    app.state = AppState::Clarifying;
+                                    app.focus = FocusArea::FooterButtons;
+                                    app.footer_focus = 0;
+                                }
+                            },
                             Err(e) => {
                                 app.state = AppState::Error(format!("Routing error: {}", e));
                             }
@@ -647,11 +681,15 @@ async fn run_app(
                             KeyCode::Char(c) => {
                                 if app.focus == FocusArea::Proposal {
                                     app.input.push(c);
+                                    app.notice = None;
+                                    app.clarify = None;
                                 }
                             }
                             KeyCode::Backspace => {
                                 if app.focus == FocusArea::Proposal {
                                     app.input.pop();
+                                    app.notice = None;
+                                    app.clarify = None;
                                 }
                             }
                             KeyCode::Esc => return Ok(()),
@@ -772,7 +810,8 @@ async fn run_app(
                         | AppState::DryRunning
                         | AppState::PendingRouting
                         | AppState::PendingGeneration
-                        | AppState::PendingDryRun => {
+                        | AppState::PendingDryRun
+                        | AppState::Clarifying => {
                             // Non-interactive states
                         }
                     }
@@ -876,6 +915,8 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
         }
         FooterAction::ClearInput => {
             app.input.clear();
+            app.notice = None;
+            app.clarify = None;
             app.focus = FocusArea::Proposal;
         }
         FooterAction::Submit => {
@@ -887,6 +928,8 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
                 app.dry_run_output = None;
                 app.output_scroll = 0;
                 app.selected_plugin = None;
+                app.notice = None;
+                app.clarify = None;
                 app.focus = FocusArea::FooterButtons;
                 app.footer_focus = 0;
                 app.state = AppState::PendingRouting;
@@ -904,6 +947,8 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.dry_run_output = None;
             app.output_scroll = 0;
             app.selected_plugin = None;
+            app.notice = None;
+            app.clarify = None;
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
         }
@@ -922,6 +967,8 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.dry_run_output = None;
             app.output_scroll = 0;
             app.selected_plugin = None;
+            app.notice = None;
+            app.clarify = None;
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
         }
@@ -930,6 +977,8 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.command_draft.clear();
             app.dry_run_output = None;
             app.output_scroll = 0;
+            app.notice = None;
+            app.clarify = None;
             app.focus = FocusArea::FooterButtons;
             app.footer_focus = 0;
             app.state = AppState::PendingGeneration;
@@ -961,8 +1010,28 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.dry_run_output = None;
             app.output_scroll = 0;
             app.selected_plugin = None;
+            app.notice = None;
+            app.clarify = None;
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
+        }
+        FooterAction::ClarifySelect(idx) => {
+            if let Some(payload) = &app.clarify {
+                if let Some(opt) = payload.options.get(idx) {
+                    app.input = opt.resolved_intent.clone();
+                    app.logs.push(format!("Clarify selected: {}", opt.label));
+                    app.generated_command = None;
+                    app.command_draft.clear();
+                    app.dry_run_output = None;
+                    app.output_scroll = 0;
+                    app.selected_plugin = None;
+                    app.notice = None;
+                    app.clarify = None;
+                    app.focus = FocusArea::FooterButtons;
+                    app.footer_focus = 0;
+                    app.state = AppState::PendingRouting;
+                }
+            }
         }
     }
 
@@ -1037,7 +1106,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         AppState::Routing
         | AppState::Generating
         | AppState::PendingRouting
-        | AppState::PendingGeneration => (
+        | AppState::PendingGeneration
+        | AppState::Clarifying => (
             " USER INTENT ",
             {
                 let mut lines = vec![Line::from("")];
@@ -1275,6 +1345,17 @@ fn footer_buttons_for_state(app: &App) -> Vec<(FooterAction, String)> {
             (FooterAction::ResetToInput, "BACK".to_string()),
             (FooterAction::Quit, "QUIT".to_string()),
         ],
+        AppState::Clarifying => {
+            let mut buttons = Vec::new();
+            if let Some(payload) = &app.clarify {
+                for (i, opt) in payload.options.iter().enumerate() {
+                    buttons.push((FooterAction::ClarifySelect(i), opt.label.clone()));
+                }
+            }
+            buttons.push((FooterAction::BackToInput, "BACK".to_string()));
+            buttons.push((FooterAction::Quit, "QUIT".to_string()));
+            buttons
+        }
         _ => vec![(FooterAction::Quit, "QUIT".to_string())],
     }
 }
@@ -1335,6 +1416,7 @@ fn output_title(app: &App) -> &'static str {
         | AppState::PendingRouting
         | AppState::PendingGeneration
         | AppState::PendingDryRun => " PROCESSING ",
+        AppState::Clarifying => " CLARIFICATION ",
         AppState::AwaitingConfirmation => " PREVIEW / CONFIRMATION ",
         AppState::EditingCommand => " EDIT COMMAND ",
         AppState::Finished(_) => " EXECUTION RESULTS ",
@@ -1356,6 +1438,7 @@ fn build_output_lines<'a>(app: &'a App) -> Vec<Line<'a>> {
         | AppState::PendingRouting
         | AppState::PendingGeneration
         | AppState::PendingDryRun => render_processing_view(app, &app.theme),
+        AppState::Clarifying => render_clarify_view(app, &app.theme),
         AppState::AwaitingConfirmation => render_preview_view(app, &app.theme),
         AppState::EditingCommand => render_edit_command_view(app, &app.theme),
         AppState::Finished(out) => {
@@ -1398,14 +1481,22 @@ fn render_debug<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
 }
 
 fn render_input_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
-    let mut text = vec![
+    let mut text = vec![];
+    if let Some(notice) = &app.notice {
+        text.push(Line::from(""));
+        for line in notice.lines() {
+            text.push(Line::from(Span::styled(line, theme.error_style)));
+        }
+        text.push(Line::from(""));
+    }
+    text.extend(vec![
         Line::from(""),
         Line::from(Span::styled(
             "Ready for instructions. Type your command above.",
             theme.header_subtitle_style,
         )),
         Line::from(""),
-    ];
+    ]);
 
     if let Some(ctx) = &app.current_context {
         let files_str = if ctx.files.is_empty() {
@@ -1443,6 +1534,43 @@ fn render_input_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         }
     }
     text
+}
+
+fn render_clarify_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines = vec![Line::from("")];
+    if let Some(payload) = &app.clarify {
+        lines.push(Line::from(Span::styled(
+            "This could mean more than one action.",
+            theme.header_subtitle_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            &payload.question,
+            theme.header_subtitle_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "Choose one option below to continue.",
+            theme.header_subtitle_style,
+        )));
+        lines.push(Line::from(""));
+
+        for opt in payload.options.iter() {
+            lines.push(Line::from(vec![
+                Span::styled("OPTION: ", theme.header_subtitle_style),
+                Span::styled(&opt.label, theme.header_title_style),
+            ]));
+            lines.push(Line::from(Span::styled(
+                &opt.detail,
+                theme.header_subtitle_style,
+            )));
+            lines.push(Line::from(""));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Clarification required, but no options are available.",
+            theme.error_style,
+        )));
+    }
+    lines
 }
 
 fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
