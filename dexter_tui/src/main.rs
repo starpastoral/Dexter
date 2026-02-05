@@ -1479,11 +1479,13 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         processing_quip(app.tick_count, belt.bounce_count)
     };
 
-    let quip_line = if let Some(col) = belt.dropped_col {
-        // A dropped token falls into the status line. Still one line of copy.
-        format!("{:width$}o  {}", "", quip, width = col)
+    // Reserve a dedicated line under the belt for the dropped token so the quip never shifts.
+    let drop_line = if let Some(col) = belt.dropped_col {
+        // Clamp to avoid wrapping on very narrow terminals.
+        let col = col.min(belt_w.saturating_sub(1));
+        format!("{:width$}o", "", width = col)
     } else {
-        quip
+        String::new()
     };
 
     vec![
@@ -1493,7 +1495,8 @@ fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
             Span::styled(format!("{}...", action), theme.processing_text_style),
         ]),
         Line::from(Span::styled(belt.line, theme.header_subtitle_style)),
-        Line::from(Span::styled(quip_line, theme.header_subtitle_style)),
+        Line::from(Span::styled(drop_line, theme.header_subtitle_style)),
+        Line::from(Span::styled(quip, theme.header_subtitle_style)),
         Line::from(""),
     ]
 }
