@@ -2,123 +2,123 @@
 
 > **The Retro-Futurist AI Command Copilot**
 
-Dexter is a terminal-based AI assistant designed to democratize powerful command-line utilities. It acts as a "Co-pilot" for your shell, routing your natural language intent to specialized tools (like `f2` and `ffmpeg`), constructing complex commands, and ensuring safe execution through a strict verification process.
+Dexter is a terminal-based AI assistant that routes natural-language intent to specialized CLI tools (such as `f2`, `ffmpeg`, `pandoc`, and `yt-dlp`), builds commands, and enforces a confirmation-first execution flow.
 
 ## Features
 
--   **Intelligent Routing**: Dexter's Router Agent analyzes your request and selects the best tool for the job.
--   **Safety First**:
-    -   **Sandboxed Execution**: Dangerous commands (`rm`, `mv /`, `dd`) are hard-blocked.
-    -   **Confirmation Loop**: No command runs without your explicit approval.
-    -   **Context Awareness**: Understands your current directory structure to make smarter decisions.
--   **Plugin Architecture**:
-    -   **F2**: Powerful batch renaming.
-    -   **FFmpeg**: Complex media conversion and processing with AI-generated previews and logic validation.
-    -   **Pandoc**: Document conversion (Markdown/DOCX/HTML/PDF and more).
-    -   **yt-dlp**: Download videos or audio with format selection and audio extraction.
--   **Premium Retro-Futurist UI**: A stunning TUI inspired by CRT terminals, built with `ratatui`.
-    -   **Multiple Themes**: Choose between the classic **Amber Retro**, a modern **Light Mode**, or let **Auto** decide based on your system.
+- **Intelligent Routing**: A router model selects the most suitable plugin for each request.
+- **Multi-Provider LLM Support**:
+  - Gemini
+  - DeepSeek
+  - Groq
+  - Baseten
+  - Ollama (local)
+- **Provider + Model Fallback**:
+  - Multiple providers can be configured and stored at the same time.
+  - Providers can be configured but kept disabled at runtime.
+  - Multiple active models can be selected and ordered for fallback.
+- **Guided Setup + Runtime Settings TUI**:
+  - First-run guided setup.
+  - Re-open settings anytime via the footer `[SETTINGS]` button.
+- **Safety First**:
+  - High-risk commands are blocked.
+  - No execution without explicit confirmation.
+  - Working-directory context is included for safer command generation.
+- **Retro TUI (ratatui)**:
+  - Themed terminal UI.
+  - Narrow-terminal adaptive layout (compact footer/buttons and dynamic setup table widths).
 
 ## Getting Started
 
 ### Prerequisites
 
--   **Rust** (latest stable)
--   **FFmpeg** (must be in your `$PATH`)
--   **F2** (must be in your `$PATH`)
--   **Pandoc** (optional, required for document conversions)
--   **yt-dlp** (must be in your `$PATH`)
+- Rust (latest stable)
+- `f2` in `$PATH`
+- `ffmpeg` in `$PATH`
+- `yt-dlp` in `$PATH`
+- `pandoc` in `$PATH` (optional; required for document conversions)
 
-### Quick Install (Recommended)
+### Quick Install
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/your-username/dexter.git
-    cd dexter
-    ```
+1. Clone repository:
+```bash
+git clone https://github.com/your-username/dexter.git
+cd dexter
+```
 
-2.  Run the automated installation script:
-    ```bash
-    chmod +x install.sh
-    ./install.sh
-    ```
+2. Run installer:
+```bash
+chmod +x install.sh
+./install.sh
+```
 
-3.  After installation, simply run:
-    ```bash
-    dexter
-    ```
+3. Start:
+```bash
+dexter
+```
 
 ### Manual Build
 
-If you prefer to build from source:
+```bash
+cargo build --release
+mkdir -p ~/.local/bin
+cp target/release/dexter ~/.local/bin/
+```
 
-1.  Compile the release binary:
-    ```bash
-    cargo build --release
-    ```
+Ensure `~/.local/bin` is in your `PATH`.
 
-2.  Install to your local bin:
-    ```bash
-    mkdir -p ~/.local/bin
-    cp target/release/dexter ~/.local/bin/
-    ```
+## Setup Wizard Flow
 
-3.  Ensure `~/.local/bin` is in your `PATH`.
+Configuration file: `~/.config/dexter/config.toml`
 
-## Configuration & Guided Setup
+Dexter setup now follows this linear flow:
 
-Dexter features a **Guided Setup Wizard** that launches automatically on your first run. It will assist you with:
+1. **Providers Toggle**
+2. **Provider Config**
+3. **Models Toggle**
+4. **All Models Confirmation / Fallback Order**
+5. **Enter = Save & Leave**, **Esc = Back to Step 1**
 
-1.  **API Key Configuration**: Securely enter your Gemini, DeepSeek.
-2.  **Dynamic Model Discovery**: Automatically fetches and lets you select the latest available models from your providers.
-3.  **Environment Check**: Verifies that required plugins (`f2`, `ffmpeg`) are correctly installed.
+Key behavior:
 
-Configuration is persisted in `~/.config/dexter/config.toml`.
+- `Space` toggles provider/model selection.
+- `Enter` on Step 1 starts the guided setup sequence.
+- Step 3 includes a `Select All` row.
+- Step 4 supports reordering via `U/K` (up) and `D/J` (down).
 
 ## Usage
 
-Simply launch Dexter and type your intent in natural language.
+Launch Dexter and describe your task in natural language.
 
-**Examples:**
+Examples:
 
-*   **Batch Renaming**:
-    > "Rename all .jpeg files to .jpg and add a 'vacation_' prefix."
-    
-*   **Media Processing**:
-    > "Convert input.mp4 to a high-quality GIF, crop it to square, and optimize."
-    
-    *Dexter will validate the FFmpeg flags and provide a dry-run preview before execution.*
-
-*   **Media Downloading**:
-    > "Download this YouTube video as mp3 and save it to ./music with the title as filename."
+- **Batch renaming**:
+  - "Rename all .jpeg files to .jpg and add a `vacation_` prefix."
+- **Media processing**:
+  - "Convert input.mp4 to a high-quality GIF, crop it to square, and optimize."
+- **Media downloading**:
+  - "Download this YouTube video as mp3 and save it to `./music`."
 
 ## Architecture
 
-Dexter is built as a modular Rust workspace:
+- `dexter_core`: LLM routing, model/provider fallback, safety logic.
+- `dexter_plugins`: Plugin system and tool adapters.
+- `dexter_tui`: Terminal UI and setup/settings flow.
 
--   `dexter_core`: The core logic (LLM communication, routing, and safety).
--   `dexter_plugins`: Extensible plugin system for external CLI tools.
--   `dexter_tui`: The high-fidelity terminal interface.
+## Notes
+
+- Router JSON parsing is now tolerant of partial/invalid `clarify` payloads from models and falls back to normal plugin routing when clarify data is incomplete.
 
 ## Roadmap
 
-### Plugins
-- Add ImageMagick support
-
-### Features
-- Add Groq support
-- Add Baseten support
-- Add providers fallback
-- Improve setup flow, add provider validation
-- Proposal can be regenerated or edited
-- Keyboard shortcuts support
-- Proposal history and pinned proposals
-- LLM cache hit
+- Add ImageMagick plugin support.
+- Improve history and pinned proposals.
+- Expand keyboard shortcuts and power-user workflows.
 
 ## Contributing
 
-Contributions are welcome! Please ensure new plugins implement the necessary safety traits and match the Amber-monochrome aesthetic.
+Contributions are welcome. Please keep safety constraints intact and follow existing project style.
 
 ## License
 
-MIT License
+MIT
