@@ -1,4 +1,4 @@
-pub use config::{Config, ProviderAuth, ProviderConfig, ProviderKind};
+pub use config::{Config, ModelRoute, ProviderAuth, ProviderConfig, ProviderKind};
 pub use context::{ContextScanner, FileContext};
 pub use executor::Executor;
 pub use llm::{CachePolicy, LlmClient};

@@ -39,7 +39,7 @@ impl Default for ApiKeys {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Gemini,
-    DeepSeek,
+    Deepseek,
     Groq,
     Baseten,
     Ollama,
@@ -49,19 +49,19 @@ pub enum ProviderKind {
 impl ProviderKind {
     pub fn display_name(self) -> &'static str {
         match self {
-            ProviderKind::Gemini => "Gemini",
-            ProviderKind::DeepSeek => "DeepSeek",
-            ProviderKind::Groq => "Groq",
-            ProviderKind::Baseten => "Baseten",
-            ProviderKind::Ollama => "Ollama",
-            ProviderKind::Custom => "Custom Endpoint",
+            ProviderKind::Gemini => "GEMINI",
+            ProviderKind::Deepseek => "DEEPSEEK",
+            ProviderKind::Groq => "GROQ",
+            ProviderKind::Baseten => "BASETEN",
+            ProviderKind::Ollama => "OLLAMA",
+            ProviderKind::Custom => "CUSTOM",
         }
     }
 
     pub fn default_base_url(self) -> &'static str {
         match self {
             ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
-            ProviderKind::DeepSeek => "https://api.deepseek.com/v1",
+            ProviderKind::Deepseek => "https://api.deepseek.com/v1",
             ProviderKind::Groq => "https://api.groq.com/openai/v1",
             ProviderKind::Baseten => "https://inference.baseten.co/v1",
             ProviderKind::Ollama => "http://localhost:11434/v1",
@@ -84,7 +84,7 @@ impl ProviderKind {
                 "gemini-2.5-flash".to_string(),
                 "gemini-2.5-pro".to_string(),
             ],
-            ProviderKind::DeepSeek => {
+            ProviderKind::Deepseek => {
                 vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]
             }
             ProviderKind::Groq => vec![
@@ -211,6 +211,10 @@ pub struct ModelPreferences {
     pub router_fallback_models: Vec<String>,
     #[serde(default)]
     pub executor_fallback_models: Vec<String>,
+    #[serde(default)]
+    pub router_routes: Vec<ModelRoute>,
+    #[serde(default)]
+    pub executor_routes: Vec<ModelRoute>,
 }
 
 fn default_router_model() -> String {
@@ -228,8 +232,16 @@ impl Default for ModelPreferences {
             executor_model: default_executor_model(),
             router_fallback_models: Vec::new(),
             executor_fallback_models: Vec::new(),
+            router_routes: Vec::new(),
+            executor_routes: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ModelRoute {
+    pub provider: ProviderKind,
+    pub model: String,
 }
 
 impl Default for Config {
@@ -309,7 +321,7 @@ impl Config {
         }
 
         if let Some(key) = clean_optional(self.api_keys.deepseek.clone()) {
-            providers.push(ProviderConfig::builtin(ProviderKind::DeepSeek, Some(key)));
+            providers.push(ProviderConfig::builtin(ProviderKind::Deepseek, Some(key)));
         }
 
         if let Some(base_url) = clean_optional(self.api_keys.base_url.clone()) {

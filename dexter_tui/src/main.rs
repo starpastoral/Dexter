@@ -9,15 +9,18 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dexter_core::{
-    CachePolicy, ClarifyOption, Config, ContextScanner, Executor, LlmClient, ProviderAuth,
-    ProviderConfig, ProviderKind, RouteOutcome, Router, SafetyGuard,
+    CachePolicy, ClarifyOption, Config, ContextScanner, Executor, LlmClient, ModelRoute,
+    ProviderAuth, ProviderConfig, ProviderKind, RouteOutcome, Router, SafetyGuard,
 };
 use dexter_plugins::{F2Plugin, FFmpegPlugin, PandocPlugin, Plugin, PreviewContent, YtDlpPlugin};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Table, Wrap,
+    },
     Frame, Terminal,
 };
 use std::io::{stdout, Stdout};
@@ -132,13 +135,15 @@ struct ClarifyPayload {
 impl App {
     fn new(config: Config) -> Self {
         let providers = config.configured_providers();
-        let router_client = LlmClient::with_fallbacks(
+        let router_client = LlmClient::with_routes(
             providers.clone(),
+            config.models.router_routes.clone(),
             config.models.router_model.clone(),
             config.models.router_fallback_models.clone(),
         );
-        let executor_client = LlmClient::with_fallbacks(
+        let executor_client = LlmClient::with_routes(
             providers,
+            config.models.executor_routes.clone(),
             config.models.executor_model.clone(),
             config.models.executor_fallback_models.clone(),
         );
@@ -192,13 +197,15 @@ impl App {
 
     fn apply_config(&mut self, config: Config) {
         let providers = config.configured_providers();
-        let router_client = LlmClient::with_fallbacks(
+        let router_client = LlmClient::with_routes(
             providers.clone(),
+            config.models.router_routes.clone(),
             config.models.router_model.clone(),
             config.models.router_fallback_models.clone(),
         );
-        let executor_client = LlmClient::with_fallbacks(
+        let executor_client = LlmClient::with_routes(
             providers,
+            config.models.executor_routes.clone(),
             config.models.executor_model.clone(),
             config.models.executor_fallback_models.clone(),
         );
@@ -1578,13 +1585,20 @@ fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn get_provider_name(config: &Config) -> String {
+    if let Some(primary_route) = config.models.executor_routes.first() {
+        return primary_route.provider.display_name().to_string();
+    }
+
     let providers = config.configured_providers();
-    if providers.is_empty() {
-        "Unknown".to_string()
-    } else if providers.len() == 1 {
-        providers[0].display_name()
+    if let Some(provider) = providers
+        .iter()
+        .find(|p| p.models.iter().any(|m| m == &config.models.executor_model))
+    {
+        provider.display_name()
+    } else if let Some(provider) = providers.first() {
+        provider.display_name()
     } else {
-        format!("{} +{}", providers[0].display_name(), providers.len() - 1)
+        "Unknown".to_string()
     }
 }
 
@@ -2424,8 +2438,9 @@ enum SetupState {
     Welcome,
     ProviderSelection,
     ProviderConfig,
-    FetchingModels,
-    ModelSelection,
+    FetchingProviderModels,
+    ProviderModelSelection,
+    ModelOrderSelection,
     ThemeSelection,
     Confirm,
     Saving,
@@ -2435,11 +2450,13 @@ enum SetupState {
 #[derive(Debug, Clone)]
 struct SetupProviderEntry {
     kind: ProviderKind,
-    selected: bool,
+    enabled: bool,
     api_key: String,
     base_url: String,
     auth: ProviderAuth,
-    models: Vec<String>,
+    available_models: Vec<String>,
+    active_models: Vec<String>,
+    runtime_ready: Option<bool>, // For local providers like Ollama
 }
 
 impl SetupProviderEntry {
@@ -2449,6 +2466,10 @@ impl SetupProviderEntry {
 
     fn requires_api_key(&self) -> bool {
         !matches!(self.auth, ProviderAuth::None)
+    }
+
+    fn has_key(&self) -> bool {
+        !self.api_key.trim().is_empty()
     }
 
     fn to_provider_config(&self) -> ProviderConfig {
@@ -2461,33 +2482,43 @@ impl SetupProviderEntry {
             kind: self.kind,
             name: Some(self.name().to_string()),
             api_key,
-            base_url: self.base_url.clone(),
+            base_url: self.base_url.trim().to_string(),
             auth: self.auth,
-            enabled: self.selected,
-            models: if self.models.is_empty() {
-                self.kind.default_models()
-            } else {
-                self.models.clone()
-            },
+            enabled: self.enabled,
+            models: dedup_models(self.active_models.clone()),
         }
         .normalized()
     }
+
+    fn to_provider_config_for_fetch(&self) -> ProviderConfig {
+        let mut cfg = self.to_provider_config();
+        cfg.enabled = true;
+        cfg
+    }
 }
 
-#[derive(Debug, Clone)]
-struct ModelChoice {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelRouteDraft {
     provider_idx: usize,
     model: String,
-    display: String,
+}
+
+impl ModelRouteDraft {
+    fn key(&self) -> String {
+        format!("{}::{}", self.provider_idx, self.model)
+    }
 }
 
 struct SetupApp {
     state: SetupState,
     providers: Vec<SetupProviderEntry>,
     selected_provider_idx: usize,
-    provider_config_step: usize,
-    available_models: Vec<ModelChoice>,
-    selected_model_idx: usize,
+    config_provider_idx: Option<usize>,
+    guided_provider_order: Vec<usize>,
+    guided_provider_pos: usize,
+    provider_model_cursor: usize,
+    model_order: Vec<ModelRouteDraft>,
+    model_order_cursor: usize,
     available_themes: Vec<(&'static str, &'static str)>,
     selected_theme_idx: usize,
     config: Config,
@@ -2497,16 +2528,19 @@ struct SetupApp {
 impl SetupApp {
     fn new(config: Config, show_welcome: bool) -> Self {
         let mut providers = build_provider_entries(&config);
-        if !providers.iter().any(|p| p.selected) {
+        if !providers.iter().any(|p| p.enabled) {
             if let Some(gemini) = providers
                 .iter_mut()
                 .find(|p| matches!(p.kind, ProviderKind::Gemini))
             {
-                gemini.selected = true;
+                gemini.enabled = true;
+                if gemini.active_models.is_empty() {
+                    gemini.active_models = vec!["gemini-2.5-flash-lite".to_string()];
+                }
             }
         }
 
-        Self {
+        let mut app = Self {
             state: if show_welcome {
                 SetupState::Welcome
             } else {
@@ -2514,9 +2548,12 @@ impl SetupApp {
             },
             providers,
             selected_provider_idx: 0,
-            provider_config_step: 0,
-            available_models: Vec::new(),
-            selected_model_idx: 0,
+            config_provider_idx: None,
+            guided_provider_order: Vec::new(),
+            guided_provider_pos: 0,
+            provider_model_cursor: 0,
+            model_order: Vec::new(),
+            model_order_cursor: 0,
             available_themes: vec![
                 ("auto", "🔄 Auto (Follow system appearance)"),
                 ("dark", "🌑 Dark (Blue on charcoal)"),
@@ -2526,124 +2563,398 @@ impl SetupApp {
             selected_theme_idx: 0,
             theme: Theme::from_config(&config.theme),
             config,
+        };
+
+        if let Some(idx) = app
+            .available_themes
+            .iter()
+            .position(|(id, _)| *id == app.config.theme)
+        {
+            app.selected_theme_idx = idx;
+        }
+
+        let mut seeded = false;
+        if !app.config.models.executor_routes.is_empty() {
+            for route in &app.config.models.executor_routes {
+                if let Some((provider_idx, _)) = app
+                    .providers
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| p.kind == route.provider)
+                {
+                    if route.model.trim().is_empty() {
+                        continue;
+                    }
+                    app.model_order.push(ModelRouteDraft {
+                        provider_idx,
+                        model: route.model.clone(),
+                    });
+                    seeded = true;
+                }
+            }
+        }
+
+        if !seeded {
+            app.update_model_order_from_active();
+        }
+
+        app
+    }
+
+    async fn refresh_runtime_statuses(&mut self) {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_millis(900))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        for provider in &mut self.providers {
+            if provider.kind != ProviderKind::Ollama {
+                continue;
+            }
+            let base = provider.base_url.trim().trim_end_matches('/');
+            let root = base.strip_suffix("/v1").unwrap_or(base);
+            let probe_url = format!("{}/api/tags", root);
+            let ready = client
+                .get(&probe_url)
+                .send()
+                .await
+                .map(|res| res.status().is_success())
+                .unwrap_or(false);
+            provider.runtime_ready = Some(ready);
         }
     }
 
-    fn selected_provider_indices(&self) -> Vec<usize> {
-        self.providers
+    fn provider_selection_len(&self) -> usize {
+        self.providers.len()
+    }
+
+    fn current_guided_provider_idx(&self) -> Option<usize> {
+        self.guided_provider_order
+            .get(self.guided_provider_pos)
+            .copied()
+    }
+
+    fn start_guided_flow(&mut self) -> Result<()> {
+        let mut order: Vec<usize> = self
+            .providers
             .iter()
             .enumerate()
-            .filter_map(|(idx, p)| if p.selected { Some(idx) } else { None })
-            .collect()
-    }
+            .filter_map(|(idx, p)| if p.enabled { Some(idx) } else { None })
+            .collect();
 
-    async fn fetch_available_models(&mut self) -> Result<()> {
-        let mut all_models = Vec::new();
-        let mut errors = Vec::new();
-        let selected = self.selected_provider_indices();
-
-        for idx in selected {
-            let provider_cfg = self.providers[idx].to_provider_config();
-            let primary = provider_cfg
-                .models
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "gemini-2.5-flash-lite".to_string());
-            let client = dexter_core::LlmClient::with_fallbacks(
-                vec![provider_cfg.clone()],
-                primary,
-                Vec::new(),
-            );
-            match client.list_models().await {
-                Ok(models) => {
-                    self.providers[idx].models = models.clone();
-                    for m in models {
-                        all_models.push(ModelChoice {
-                            provider_idx: idx,
-                            display: format!("{} ({})", m, self.providers[idx].name()),
-                            model: m,
-                        });
-                    }
-                }
-                Err(e) => {
-                    errors.push(format!("{} Error: {}", self.providers[idx].name(), e));
-                }
-            }
+        if order.is_empty() {
+            return Err(anyhow!("Please enable at least one provider."));
         }
 
-        if all_models.is_empty() {
-            for idx in self.selected_provider_indices() {
-                for m in self.providers[idx].kind.default_models() {
-                    all_models.push(ModelChoice {
-                        provider_idx: idx,
-                        display: format!("{} ({})", m, self.providers[idx].name()),
-                        model: m,
-                    });
-                }
-            }
+        if let Some(pos) = order
+            .iter()
+            .position(|idx| *idx == self.selected_provider_idx)
+        {
+            order.rotate_left(pos);
         }
 
-        if all_models.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Model Discovery Failed:\n{}",
-                if errors.is_empty() {
-                    "No provider models available.".to_string()
-                } else {
-                    errors.join("\n")
-                }
-            ));
-        }
-
-        // Deduplicate by provider + model, preserve order.
-        let mut seen = std::collections::HashSet::new();
-        all_models.retain(|item| seen.insert((item.provider_idx, item.model.clone())));
-
-        self.available_models = all_models;
-        self.selected_model_idx = 0;
+        self.guided_provider_order = order;
+        self.guided_provider_pos = 0;
+        self.config_provider_idx = self.current_guided_provider_idx();
+        self.provider_model_cursor = 0;
+        self.state = SetupState::ProviderConfig;
         Ok(())
     }
 
-    async fn save_config(&mut self) -> Result<()> {
-        let selected_indices = self.selected_provider_indices();
-        let providers: Vec<ProviderConfig> = selected_indices
+    fn reset_guided_flow(&mut self) {
+        self.guided_provider_order.clear();
+        self.guided_provider_pos = 0;
+        self.config_provider_idx = None;
+        self.provider_model_cursor = 0;
+    }
+
+    fn advance_provider_config(&mut self) {
+        if self.guided_provider_pos + 1 < self.guided_provider_order.len() {
+            self.guided_provider_pos += 1;
+            self.config_provider_idx = self.current_guided_provider_idx();
+            self.state = SetupState::ProviderConfig;
+        } else {
+            self.guided_provider_pos = 0;
+            self.config_provider_idx = self.current_guided_provider_idx();
+            self.provider_model_cursor = 0;
+            self.state = SetupState::FetchingProviderModels;
+        }
+    }
+
+    fn advance_provider_models(&mut self) {
+        if self.guided_provider_pos + 1 < self.guided_provider_order.len() {
+            self.guided_provider_pos += 1;
+            self.config_provider_idx = self.current_guided_provider_idx();
+            self.provider_model_cursor = 0;
+            self.state = SetupState::FetchingProviderModels;
+        } else if self.ensure_at_least_one_route() {
+            self.state = SetupState::ModelOrderSelection;
+        } else {
+            self.state = SetupState::Error(
+                "No active models. Select at least one model for an enabled provider.".to_string(),
+            );
+        }
+    }
+
+    fn enabled_provider_names(&self) -> Vec<String> {
+        self.providers
             .iter()
-            .map(|idx| self.providers[*idx].to_provider_config())
+            .filter(|p| p.enabled)
+            .map(|p| p.name().to_string())
+            .collect()
+    }
+
+    fn disabled_provider_names(&self) -> Vec<String> {
+        self.providers
+            .iter()
+            .filter(|p| !p.enabled)
+            .map(|p| p.name().to_string())
+            .collect()
+    }
+
+    fn toggle_provider_enabled(&mut self, provider_idx: usize) {
+        if let Some(provider) = self.providers.get_mut(provider_idx) {
+            provider.enabled = !provider.enabled;
+            if provider.enabled
+                && provider.active_models.is_empty()
+                && !provider.available_models.is_empty()
+            {
+                provider
+                    .active_models
+                    .push(provider.available_models[0].clone());
+            }
+        }
+        self.update_model_order_from_active();
+    }
+
+    fn update_model_order_from_active(&mut self) -> bool {
+        let mut valid = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for (provider_idx, provider) in self.providers.iter().enumerate() {
+            if !provider.enabled {
+                continue;
+            }
+            for model in &provider.active_models {
+                let model = model.trim();
+                if model.is_empty() {
+                    continue;
+                }
+                let draft = ModelRouteDraft {
+                    provider_idx,
+                    model: model.to_string(),
+                };
+                if seen.insert(draft.key()) {
+                    valid.push(draft);
+                }
+            }
+        }
+
+        if self.model_order.is_empty() {
+            self.model_order = valid;
+        } else {
+            let valid_keys: std::collections::HashSet<String> =
+                valid.iter().map(ModelRouteDraft::key).collect();
+            let mut merged = Vec::new();
+            let mut merged_keys = std::collections::HashSet::new();
+
+            for old in &self.model_order {
+                let key = old.key();
+                if valid_keys.contains(&key) && merged_keys.insert(key) {
+                    merged.push(old.clone());
+                }
+            }
+
+            for v in valid {
+                let key = v.key();
+                if merged_keys.insert(key) {
+                    merged.push(v);
+                }
+            }
+
+            self.model_order = merged;
+        }
+
+        if self.model_order.is_empty() {
+            self.model_order_cursor = 0;
+            return false;
+        }
+
+        if self.model_order_cursor >= self.model_order.len() {
+            self.model_order_cursor = self.model_order.len().saturating_sub(1);
+        }
+
+        true
+    }
+
+    async fn fetch_models_for_current_provider(&mut self) -> Result<()> {
+        let provider_idx = self
+            .config_provider_idx
+            .ok_or_else(|| anyhow!("No provider selected for model fetch"))?;
+
+        let provider_cfg = self.providers[provider_idx].to_provider_config_for_fetch();
+        let primary = self.providers[provider_idx]
+            .active_models
+            .first()
+            .cloned()
+            .or_else(|| {
+                self.providers[provider_idx]
+                    .available_models
+                    .first()
+                    .cloned()
+            })
+            .or_else(|| provider_cfg.models.first().cloned())
+            .unwrap_or_else(|| "gemini-2.5-flash-lite".to_string());
+
+        let client = dexter_core::LlmClient::with_routes(
+            vec![provider_cfg],
+            Vec::new(),
+            primary,
+            Vec::new(),
+        );
+
+        let discovered_models = client.list_models().await;
+        let discovered_models = match discovered_models {
+            Ok(models) => {
+                if self.providers[provider_idx].kind == ProviderKind::Ollama {
+                    self.providers[provider_idx].runtime_ready = Some(true);
+                }
+                models
+            }
+            Err(_) => {
+                if self.providers[provider_idx].kind == ProviderKind::Ollama {
+                    self.providers[provider_idx].runtime_ready = Some(false);
+                }
+                self.providers[provider_idx].kind.default_models()
+            }
+        };
+
+        let mut available_models = dedup_models(discovered_models);
+        if available_models.is_empty() {
+            available_models = self.providers[provider_idx].kind.default_models();
+        }
+
+        let available_set: std::collections::HashSet<String> =
+            available_models.iter().cloned().collect();
+        let mut active_models = self.providers[provider_idx]
+            .active_models
+            .iter()
+            .filter(|m| available_set.contains(*m))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if active_models.is_empty() && !available_models.is_empty() {
+            active_models.push(available_models[0].clone());
+        }
+
+        self.providers[provider_idx].available_models = available_models;
+        self.providers[provider_idx].active_models = dedup_models(active_models);
+        self.provider_model_cursor = 0;
+        Ok(())
+    }
+
+    fn toggle_model_selection(&mut self) {
+        let Some(provider_idx) = self.config_provider_idx else {
+            return;
+        };
+        let Some(provider) = self.providers.get_mut(provider_idx) else {
+            return;
+        };
+
+        let model_count = provider.available_models.len();
+        if model_count == 0 {
+            return;
+        }
+
+        if self.provider_model_cursor < model_count {
+            let model = provider.available_models[self.provider_model_cursor].clone();
+            if let Some(pos) = provider.active_models.iter().position(|m| m == &model) {
+                provider.active_models.remove(pos);
+            } else {
+                provider.active_models.push(model);
+            }
+            provider.active_models = dedup_models(provider.active_models.clone());
+        } else {
+            let all_selected = provider.active_models.len() == model_count;
+            if all_selected {
+                provider.active_models.clear();
+            } else {
+                provider.active_models = provider.available_models.clone();
+            }
+            provider.active_models = dedup_models(provider.active_models.clone());
+        }
+
+        self.update_model_order_from_active();
+    }
+
+    fn move_model_order_up(&mut self) {
+        if self.model_order_cursor > 0 && self.model_order_cursor < self.model_order.len() {
+            self.model_order
+                .swap(self.model_order_cursor, self.model_order_cursor - 1);
+            self.model_order_cursor -= 1;
+        }
+    }
+
+    fn move_model_order_down(&mut self) {
+        if self.model_order_cursor + 1 < self.model_order.len() {
+            self.model_order
+                .swap(self.model_order_cursor, self.model_order_cursor + 1);
+            self.model_order_cursor += 1;
+        }
+    }
+
+    fn ensure_at_least_one_route(&mut self) -> bool {
+        self.update_model_order_from_active() && !self.model_order.is_empty()
+    }
+
+    async fn save_config(&mut self) -> Result<()> {
+        self.ensure_at_least_one_route();
+
+        let providers_cfg: Vec<ProviderConfig> = self
+            .providers
+            .iter()
+            .map(|p| p.to_provider_config())
             .collect();
-        self.config.providers = providers.clone();
+        self.config.providers = providers_cfg.clone();
 
         // Keep legacy fields for backward compatibility.
-        self.config.api_keys.gemini = providers
+        self.config.api_keys.gemini = providers_cfg
             .iter()
             .find(|p| matches!(p.kind, ProviderKind::Gemini))
             .and_then(|p| p.api_key.clone());
-        self.config.api_keys.deepseek = providers
+        self.config.api_keys.deepseek = providers_cfg
             .iter()
-            .find(|p| matches!(p.kind, ProviderKind::DeepSeek))
+            .find(|p| matches!(p.kind, ProviderKind::Deepseek))
             .and_then(|p| p.api_key.clone());
         self.config.api_keys.base_url = None;
 
-        // Parse selected model
-        let model_id = self
-            .available_models
-            .get(self.selected_model_idx)
-            .map(|m| m.model.clone())
-            .unwrap_or_else(|| "gemini-2.5-flash-lite".to_string());
+        let routes: Vec<ModelRoute> = self
+            .model_order
+            .iter()
+            .filter_map(|r| {
+                self.providers.get(r.provider_idx).map(|p| ModelRoute {
+                    provider: p.kind,
+                    model: r.model.clone(),
+                })
+            })
+            .collect();
 
-        self.config.models.router_model = model_id.clone();
-        self.config.models.executor_model = model_id.clone();
-        let mut fallback_models = Vec::new();
-        for m in &self.available_models {
-            if m.model == model_id {
-                continue;
-            }
-            if !fallback_models.iter().any(|x| x == &m.model) {
-                fallback_models.push(m.model.clone());
-            }
+        self.config.models.router_routes = routes.clone();
+        self.config.models.executor_routes = routes.clone();
+
+        if let Some(primary) = routes.first() {
+            self.config.models.router_model = primary.model.clone();
+            self.config.models.executor_model = primary.model.clone();
         }
+
+        let fallback_models =
+            dedup_models(routes.iter().skip(1).map(|r| r.model.clone()).collect());
         self.config.models.router_fallback_models = fallback_models.clone();
         self.config.models.executor_fallback_models = fallback_models;
 
-        // Save selected theme
         let theme_id = self.available_themes[self.selected_theme_idx].0;
         self.config.theme = theme_id.to_string();
 
@@ -2672,15 +2983,16 @@ async fn run_setup_flow(
     show_welcome: bool,
 ) -> Result<Config> {
     let mut app = SetupApp::new(config, show_welcome);
+    app.refresh_runtime_statuses().await;
 
     loop {
         terminal.draw(|f| setup_ui(f, &app))?;
 
-        if app.state == SetupState::FetchingModels {
-            if let Err(e) = app.fetch_available_models().await {
-                app.state = SetupState::Error(format!("Discovery error: {}", e));
+        if app.state == SetupState::FetchingProviderModels {
+            if let Err(e) = app.fetch_models_for_current_provider().await {
+                app.state = SetupState::Error(format!("Model discovery failed: {}", e));
             } else {
-                app.state = SetupState::ModelSelection;
+                app.state = SetupState::ProviderModelSelection;
             }
             continue;
         }
@@ -2701,97 +3013,130 @@ async fn run_setup_flow(
                                 }
                             }
                             KeyCode::Down | KeyCode::Right => {
-                                if app.selected_provider_idx < app.providers.len().saturating_sub(1)
+                                if app.selected_provider_idx
+                                    < app.provider_selection_len().saturating_sub(1)
                                 {
                                     app.selected_provider_idx += 1;
                                 }
                             }
                             KeyCode::Char(' ') => {
-                                if let Some(provider) =
-                                    app.providers.get_mut(app.selected_provider_idx)
-                                {
-                                    provider.selected = !provider.selected;
-                                }
+                                app.toggle_provider_enabled(app.selected_provider_idx);
                             }
                             KeyCode::Enter => {
-                                if app.selected_provider_indices().is_empty() {
-                                    app.state = SetupState::Error(
-                                        "Please select at least one provider.".to_string(),
-                                    );
-                                } else {
-                                    app.provider_config_step = 0;
-                                    app.state = SetupState::ProviderConfig;
+                                if let Err(e) = app.start_guided_flow() {
+                                    app.state = SetupState::Error(e.to_string());
                                 }
                             }
                             KeyCode::Esc => return Err(anyhow!("Setup aborted")),
                             _ => {}
                         },
                         SetupState::ProviderConfig => {
-                            let selected = app.selected_provider_indices();
-                            let Some(current_idx) = selected.get(app.provider_config_step).copied()
-                            else {
-                                app.state = SetupState::FetchingModels;
+                            let Some(provider_idx) = app.config_provider_idx else {
+                                app.state = SetupState::ProviderSelection;
                                 continue;
                             };
-                            let requires_key = app.providers[current_idx].requires_api_key();
+                            let requires_key = app.providers[provider_idx].requires_api_key();
                             match key.code {
                                 KeyCode::Enter => {
                                     if requires_key
-                                        && app.providers[current_idx].api_key.trim().is_empty()
+                                        && app.providers[provider_idx].api_key.trim().is_empty()
                                     {
                                         app.state = SetupState::Error(format!(
                                             "{} requires an API key.",
-                                            app.providers[current_idx].name()
+                                            app.providers[provider_idx].name()
                                         ));
-                                    } else if app.provider_config_step + 1 < selected.len() {
-                                        app.provider_config_step += 1;
                                     } else {
-                                        app.state = SetupState::FetchingModels;
+                                        app.advance_provider_config();
                                     }
                                 }
                                 KeyCode::Char(c) => {
                                     if requires_key {
-                                        app.providers[current_idx].api_key.push(c);
+                                        app.providers[provider_idx].api_key.push(c);
                                     }
                                 }
                                 KeyCode::Backspace => {
                                     if requires_key {
-                                        app.providers[current_idx].api_key.pop();
+                                        app.providers[provider_idx].api_key.pop();
                                     }
                                 }
                                 KeyCode::Esc => {
-                                    if app.provider_config_step > 0 {
-                                        app.provider_config_step -= 1;
-                                    } else {
-                                        app.state = SetupState::ProviderSelection;
-                                    }
+                                    app.reset_guided_flow();
+                                    app.state = SetupState::ProviderSelection;
                                 }
                                 _ => {}
                             }
                         }
-                        SetupState::FetchingModels => {} // No input while fetching
-                        SetupState::ModelSelection => match key.code {
+                        SetupState::FetchingProviderModels => {}
+                        SetupState::ProviderModelSelection => {
+                            let Some(provider_idx) = app.config_provider_idx else {
+                                app.state = SetupState::ProviderSelection;
+                                continue;
+                            };
+                            let model_count = app.providers[provider_idx].available_models.len();
+                            let max_idx = model_count; // last row is Select All
+                            match key.code {
+                                KeyCode::Up | KeyCode::Left => {
+                                    if app.provider_model_cursor > 0 {
+                                        app.provider_model_cursor -= 1;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Right => {
+                                    if app.provider_model_cursor < max_idx {
+                                        app.provider_model_cursor += 1;
+                                    }
+                                }
+                                KeyCode::Char(' ') => app.toggle_model_selection(),
+                                KeyCode::Enter => {
+                                    if app.providers[provider_idx].enabled
+                                        && app.providers[provider_idx].active_models.is_empty()
+                                        && !app.providers[provider_idx].available_models.is_empty()
+                                    {
+                                        let first_model =
+                                            app.providers[provider_idx].available_models[0].clone();
+                                        app.providers[provider_idx].active_models.push(first_model);
+                                    }
+                                    app.update_model_order_from_active();
+                                    app.advance_provider_models();
+                                }
+                                KeyCode::Esc => app.state = SetupState::ProviderConfig,
+                                _ => {}
+                            }
+                        }
+                        SetupState::ModelOrderSelection => match key.code {
                             KeyCode::Up | KeyCode::Left => {
-                                if app.selected_model_idx > 0 {
-                                    app.selected_model_idx -= 1;
+                                if app.model_order_cursor > 0 {
+                                    app.model_order_cursor -= 1;
                                 }
                             }
                             KeyCode::Down | KeyCode::Right => {
-                                if app.selected_model_idx
-                                    < app.available_models.len().saturating_sub(1)
+                                if app.model_order_cursor < app.model_order.len().saturating_sub(1)
                                 {
-                                    app.selected_model_idx += 1;
+                                    app.model_order_cursor += 1;
                                 }
                             }
-                            KeyCode::Enter => app.state = SetupState::ThemeSelection,
-                            KeyCode::Esc => app.state = SetupState::ProviderConfig,
+                            KeyCode::Char('u') | KeyCode::Char('k') => app.move_model_order_up(),
+                            KeyCode::Char('d') | KeyCode::Char('j') => app.move_model_order_down(),
+                            KeyCode::Enter => {
+                                if app.model_order.is_empty() {
+                                    app.state = SetupState::Error(
+                                        "No active models in routing order.".to_string(),
+                                    );
+                                } else {
+                                    app.state = SetupState::Saving;
+                                    app.save_config().await?;
+                                    return Ok(app.config);
+                                }
+                            }
+                            KeyCode::Esc => {
+                                app.reset_guided_flow();
+                                app.state = SetupState::ProviderSelection;
+                            }
                             _ => {}
                         },
                         SetupState::ThemeSelection => match key.code {
                             KeyCode::Up | KeyCode::Left => {
                                 if app.selected_theme_idx > 0 {
                                     app.selected_theme_idx -= 1;
-                                    // Live preview
                                     let theme_id = app.available_themes[app.selected_theme_idx].0;
                                     app.theme = Theme::from_config(theme_id);
                                 }
@@ -2801,34 +3146,31 @@ async fn run_setup_flow(
                                     < app.available_themes.len().saturating_sub(1)
                                 {
                                     app.selected_theme_idx += 1;
-                                    // Live preview
                                     let theme_id = app.available_themes[app.selected_theme_idx].0;
                                     app.theme = Theme::from_config(theme_id);
                                 }
                             }
                             KeyCode::Enter => app.state = SetupState::Confirm,
-                            KeyCode::Esc => app.state = SetupState::ModelSelection,
+                            KeyCode::Esc => app.state = SetupState::ModelOrderSelection,
                             _ => {}
                         },
-                        SetupState::Confirm => {
-                            match key.code {
-                                KeyCode::Enter | KeyCode::Char('y') => {
-                                    app.state = SetupState::Saving;
-                                    app.save_config().await?;
-                                    return Ok(app.config);
-                                }
-                                KeyCode::Esc | KeyCode::Char('n') => {
-                                    app.state = SetupState::ThemeSelection; // Go back
-                                }
-                                _ => {}
+                        SetupState::Confirm => match key.code {
+                            KeyCode::Enter | KeyCode::Char('y') => {
+                                app.state = SetupState::Saving;
+                                app.save_config().await?;
+                                return Ok(app.config);
                             }
-                        }
+                            KeyCode::Esc | KeyCode::Char('n') => {
+                                app.state = SetupState::ThemeSelection
+                            }
+                            _ => {}
+                        },
                         SetupState::Error(_) => {
                             if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
                                 app.state = SetupState::ProviderSelection;
                             }
                         }
-                        _ => {}
+                        SetupState::Saving => {}
                     }
                 }
             }
@@ -2846,7 +3188,6 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
         ])
         .split(f.area());
 
-    // Header
     let header = Paragraph::new(Span::styled(
         " D E X T E R  //  INITIALIZATION ",
         app.theme.header_title_style,
@@ -2858,7 +3199,11 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
     );
     f.render_widget(header, chunks[0]);
 
-    // Content
+    if app.state == SetupState::ProviderSelection {
+        render_setup_provider_table(f, app, chunks[1]);
+        return;
+    }
+
     let content_text = match &app.state {
         SetupState::Welcome => vec![
             Line::from(""),
@@ -2868,149 +3213,195 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Dexter Requires Access to Advanced Neural Networks to Function.",
+                "Configure Providers, Models, and Fallback Priority.",
                 app.theme.header_subtitle_style,
             )),
-            Line::from("We Will Guide You Through Multi-Provider Setup and Model Selection."),
             Line::from(""),
             Line::from(Span::styled(
                 "[PRESS ENTER TO BEGIN]",
                 app.theme.input_cursor_style,
             )),
         ],
-        SetupState::ProviderSelection => {
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    "STEP 1: SELECT PROVIDERS",
-                    app.theme.header_title_style,
-                )),
-                Line::from(""),
-                Line::from("Choose one or more providers for routing + fallback:"),
-                Line::from(""),
-            ];
-
-            for (idx, provider) in app.providers.iter().enumerate() {
-                let is_cursor = idx == app.selected_provider_idx;
-                let style = if is_cursor {
-                    app.theme.proposal_cmd_style
-                } else {
-                    app.theme.header_subtitle_style
-                };
-                let marker = if provider.selected { "[x]" } else { "[ ]" };
-                let prefix = if is_cursor { "> " } else { "  " };
-                lines.push(Line::from(Span::styled(
-                    format!("{}{} {}", prefix, marker, provider.name()),
-                    style,
-                )));
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "(↑↓ Move, SPACE Toggle, ENTER Continue)",
-                app.theme.header_subtitle_style,
-            )));
-            lines
-        }
+        SetupState::ProviderSelection => vec![],
         SetupState::ProviderConfig => {
-            let selected = app.selected_provider_indices();
-            let current_idx = selected.get(app.provider_config_step).copied();
-            if let Some(provider_idx) = current_idx {
+            if let Some(provider_idx) = app.config_provider_idx {
                 let provider = &app.providers[provider_idx];
-                let total = selected.len();
-                let step = app.provider_config_step + 1;
-                let mut lines = vec![
+                let total = app.guided_provider_order.len().max(1);
+                let current = app.guided_provider_pos + 1;
+                vec![
                     Line::from(Span::styled(
-                        format!("STEP 2: CONFIGURE PROVIDER ({}/{})", step, total),
+                        format!("STEP 2: PROVIDERS CONFIG ({}/{})", current, total),
                         app.theme.header_title_style,
                     )),
                     Line::from(""),
                     Line::from(format!("Provider: {}", provider.name())),
+                    Line::from(format!("Runtime Enabled: {}", provider.enabled)),
                     Line::from(format!("Base URL: {}", provider.base_url)),
                     Line::from(""),
-                ];
-
-                if provider.requires_api_key() {
-                    lines.push(Line::from("Enter API Key:"));
-                    lines.push(Line::from(vec![
+                    Line::from(if provider.requires_api_key() {
+                        "API Key (editable):"
+                    } else {
+                        "API Key not required for this provider"
+                    }),
+                    Line::from(vec![
                         Span::styled("> ", app.theme.input_prompt_style),
                         Span::styled(
-                            if provider.api_key.is_empty() {
-                                "_"
+                            if provider.requires_api_key() {
+                                if provider.api_key.is_empty() {
+                                    "_"
+                                } else {
+                                    &provider.api_key
+                                }
                             } else {
-                                &provider.api_key
+                                "N/A"
                             },
                             app.theme.input_text_style,
                         ),
-                    ]));
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        "(ENTER Next, ESC Previous Provider)",
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "ENTER: Save & Next Provider  ESC: Back to Step 1",
                         app.theme.header_subtitle_style,
-                    )));
-                } else {
-                    lines.push(Line::from("No API key required for this provider."));
-                    lines.push(Line::from(""));
+                    )),
+                ]
+            } else {
+                vec![
+                    Line::from(Span::styled(
+                        "STEP 2: PROVIDER CONFIG",
+                        app.theme.header_title_style,
+                    )),
+                    Line::from("No provider selected."),
+                ]
+            }
+        }
+        SetupState::FetchingProviderModels => {
+            let provider_name = app
+                .config_provider_idx
+                .and_then(|idx| app.providers.get(idx))
+                .map(|p| p.name().to_string())
+                .unwrap_or_else(|| "Provider".to_string());
+            vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "STEP 3: FETCHING PROVIDER MODELS",
+                    app.theme.header_title_style,
+                )),
+                Line::from(""),
+                Line::from(format!("Provider: {}", provider_name)),
+                Line::from("Connecting and discovering latest models..."),
+                Line::from(""),
+                Line::from(Span::styled("[PLEASE WAIT]", app.theme.input_cursor_style)),
+            ]
+        }
+        SetupState::ProviderModelSelection => {
+            if let Some(provider_idx) = app.config_provider_idx {
+                let provider = &app.providers[provider_idx];
+                let total = app.guided_provider_order.len().max(1);
+                let current = app.guided_provider_pos + 1;
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        format!("STEP 3: MODELS TOGGLE ({}/{})", current, total),
+                        app.theme.header_title_style,
+                    )),
+                    Line::from(""),
+                    Line::from(format!("Provider: {}", provider.name())),
+                    Line::from("Select one or more models to activate for fallback."),
+                    Line::from(""),
+                ];
+
+                for (i, model) in provider.available_models.iter().enumerate() {
+                    let is_cursor = i == app.provider_model_cursor;
+                    let checked = provider.active_models.iter().any(|m| m == model);
+                    let style = if is_cursor {
+                        app.theme.proposal_cmd_style
+                    } else {
+                        app.theme.header_subtitle_style
+                    };
                     lines.push(Line::from(Span::styled(
-                        "(ENTER Next, ESC Previous Provider)",
-                        app.theme.header_subtitle_style,
+                        format!(
+                            "{}[{}] {}",
+                            if is_cursor { "> " } else { "  " },
+                            if checked { "x" } else { " " },
+                            model
+                        ),
+                        style,
                     )));
                 }
+
+                let all_selected = !provider.available_models.is_empty()
+                    && provider.active_models.len() == provider.available_models.len();
+                let select_all_cursor =
+                    app.provider_model_cursor == provider.available_models.len();
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{}[{}] Select All",
+                        if select_all_cursor { "> " } else { "  " },
+                        if all_selected { "x" } else { " " }
+                    ),
+                    if select_all_cursor {
+                        app.theme.proposal_cmd_style
+                    } else {
+                        app.theme.header_subtitle_style
+                    },
+                )));
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "SPACE: Toggle model / Select All  ENTER: Save & Next",
+                    app.theme.header_subtitle_style,
+                )));
                 lines
             } else {
                 vec![
                     Line::from(Span::styled(
-                        "STEP 2: CONFIGURE PROVIDER",
+                        "STEP 4: SELECT ACTIVE MODELS",
                         app.theme.header_title_style,
                     )),
-                    Line::from("No selected provider found."),
+                    Line::from("No provider selected."),
                 ]
             }
         }
-        SetupState::FetchingModels => vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "STEP 3: DISCOVERING MODELS",
-                app.theme.header_title_style,
-            )),
-            Line::from(""),
-            Line::from("Connecting to Provider APIs..."),
-            Line::from("Fetching Latest Model List..."),
-            Line::from(""),
-            Line::from(Span::styled("[PLEASE WAIT]", app.theme.input_cursor_style)),
-        ],
-        SetupState::ModelSelection => {
+        SetupState::ModelOrderSelection => {
             let mut lines = vec![
                 Line::from(Span::styled(
-                    "STEP 3: SELECT PRIMARY MODEL",
+                    "STEP 4: ALL MODELS CONFIRMATION / FALLBACK ORDER",
                     app.theme.header_title_style,
                 )),
                 Line::from(""),
-                Line::from(
-                    "Select primary model (providers and models will be used for fallback):",
-                ),
+                Line::from("Primary model = top item. Fallbacks follow in order."),
+                Line::from("Use U/K to move up, D/J to move down."),
                 Line::from(""),
             ];
 
-            for (i, model) in app.available_models.iter().enumerate() {
-                let style = if i == app.selected_model_idx {
-                    app.theme.proposal_cmd_style
-                } else {
-                    app.theme.header_subtitle_style
-                };
-                let prefix = if i == app.selected_model_idx {
-                    "> "
-                } else {
-                    "  "
-                };
+            if app.model_order.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("{}{}", prefix, model.display),
-                    style,
+                    "No active models selected yet.",
+                    Style::default().fg(Color::Red),
                 )));
+            } else {
+                for (i, route) in app.model_order.iter().enumerate() {
+                    let is_cursor = i == app.model_order_cursor;
+                    let style = if is_cursor {
+                        app.theme.proposal_cmd_style
+                    } else {
+                        app.theme.header_subtitle_style
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "{}{}. {}",
+                            if is_cursor { "> " } else { "  " },
+                            i + 1,
+                            model_route_display(route, &app.providers)
+                        ),
+                        style,
+                    )));
+                }
             }
 
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "(Use Arrow Keys to Select, ENTER to Confirm)",
+                "ENTER: Save & Leave  ESC: Back to Step 1",
                 app.theme.header_subtitle_style,
             )));
             lines
@@ -3018,7 +3409,7 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
         SetupState::ThemeSelection => {
             let mut lines = vec![
                 Line::from(Span::styled(
-                    "STEP 4: SELECT THEME",
+                    "STEP 6: SELECT THEME",
                     app.theme.header_title_style,
                 )),
                 Line::from(""),
@@ -3050,42 +3441,50 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             )));
             lines
         }
-        SetupState::Confirm => vec![
-            Line::from(Span::styled(
-                "CONFIRM SETTINGS",
-                app.theme.header_title_style,
-            )),
-            Line::from(""),
-            Line::from(format!(
-                "Providers: {}",
-                app.providers
+        SetupState::Confirm => {
+            let primary = app
+                .model_order
+                .first()
+                .map(|r| model_route_display(r, &app.providers))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let fallback = if app.model_order.len() > 1 {
+                app.model_order
                     .iter()
-                    .filter(|p| p.selected)
-                    .map(|p| p.name())
+                    .skip(1)
+                    .map(|r| model_route_display(r, &app.providers))
                     .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            Line::from(format!(
-                "Selected Model: {}",
-                app.available_models
-                    .get(app.selected_model_idx)
-                    .map(|m| m.display.as_str())
-                    .unwrap_or("Unknown")
-            )),
-            Line::from(format!(
-                "Fallback Models: {}",
-                app.available_models.len().saturating_sub(1)
-            )),
-            Line::from(format!(
-                "Theme: {}",
-                app.available_themes[app.selected_theme_idx].1
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Save and Initialize? [Y/n]",
-                app.theme.input_prompt_style,
-            )),
-        ],
+                    .join(" -> ")
+            } else {
+                "None".to_string()
+            };
+
+            vec![
+                Line::from(Span::styled(
+                    "CONFIRM SETTINGS",
+                    app.theme.header_title_style,
+                )),
+                Line::from(""),
+                Line::from(format!(
+                    "Enabled Providers: {}",
+                    app.enabled_provider_names().join(", ")
+                )),
+                Line::from(format!(
+                    "Disabled Providers: {}",
+                    app.disabled_provider_names().join(", ")
+                )),
+                Line::from(format!("Primary Model: {}", primary)),
+                Line::from(format!("Fallback Order: {}", fallback)),
+                Line::from(format!(
+                    "Theme: {}",
+                    app.available_themes[app.selected_theme_idx].1
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Save and Apply? [Y/n]",
+                    app.theme.input_prompt_style,
+                )),
+            ]
+        }
         SetupState::Saving => vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -3096,6 +3495,11 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
         SetupState::Error(e) => vec![
             Line::from(Span::styled("ERROR", Style::default().fg(Color::Red))),
             Line::from(e.clone()),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press ENTER/ESC to return to provider list.",
+                app.theme.header_subtitle_style,
+            )),
         ],
     };
 
@@ -3111,37 +3515,204 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
     f.render_widget(content, chunks[1]);
 }
 
+fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style)
+        .title(" SETUP WIZARD ");
+    f.render_widget(&block, area);
+    let inner = block.inner(area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7), // title + help
+            Constraint::Length(1),
+            Constraint::Length((app.providers.len() as u16).saturating_add(2)), // header + rows
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let intro = vec![
+        Line::from(Span::styled(
+            "STEP 1: PROVIDERS (ENTER TO CONFIGURE SELECTED PROVIDER)",
+            app.theme.header_title_style,
+        )),
+        Line::from(""),
+        Line::from("SPACE: Toggle provider enabled/disabled for runtime fallback"),
+        Line::from("ENTER: Continue to providers config"),
+        Line::from("OFF providers keep model selections saved but not active at runtime."),
+    ];
+    let intro_para = Paragraph::new(intro)
+        .style(app.theme.header_subtitle_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(intro_para, layout[0]);
+
+    let header = Row::new(vec![
+        Cell::from("  "),
+        Cell::from("TOGGLE"),
+        Cell::from("PROVIDER"),
+        Cell::from("SETUP"),
+        Cell::from("ACTIVE MODELS"),
+    ])
+    .style(app.theme.footer_text_style.add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = app
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(idx, provider)| {
+            let is_cursor = idx == app.selected_provider_idx;
+            let toggle = if provider.enabled {
+                "◉ ON"
+            } else {
+                "○ OFF"
+            };
+            let setup_state = if provider.kind == ProviderKind::Ollama {
+                if provider.runtime_ready.unwrap_or(false) {
+                    "SET"
+                } else {
+                    "NOT SET"
+                }
+            } else if provider.requires_api_key() {
+                if provider.has_key() {
+                    "SET"
+                } else {
+                    "NOT SET"
+                }
+            } else {
+                "SET"
+            };
+            let active_runtime = if provider.enabled {
+                provider.active_models.len().to_string()
+            } else {
+                "0".to_string()
+            };
+
+            Row::new(vec![
+                Cell::from(if is_cursor { "> " } else { "  " }),
+                Cell::from(toggle),
+                Cell::from(provider.name().to_string()),
+                Cell::from(setup_state),
+                Cell::from(active_runtime),
+            ])
+            .style(if is_cursor {
+                app.theme.proposal_cmd_style
+            } else {
+                app.theme.header_subtitle_style
+            })
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(8),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(14),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .style(app.theme.base_style);
+
+    f.render_widget(table, layout[2]);
+}
+
 fn build_provider_entries(config: &Config) -> Vec<SetupProviderEntry> {
     let existing = config.effective_providers();
     let supported = [
         ProviderKind::Gemini,
-        ProviderKind::DeepSeek,
+        ProviderKind::Deepseek,
         ProviderKind::Groq,
         ProviderKind::Baseten,
         ProviderKind::Ollama,
     ];
 
-    supported
+    let mut entries = supported
         .iter()
         .map(|kind| {
             let mut base = ProviderConfig::builtin(*kind, None).normalized();
-            let mut selected = false;
+            let mut enabled = false;
             if let Some(existing_provider) = existing.iter().find(|p| p.kind == *kind) {
                 base.api_key = existing_provider.api_key.clone();
                 base.base_url = existing_provider.base_url.clone();
                 base.auth = existing_provider.auth;
-                base.models = existing_provider.models.clone();
-                selected = existing_provider.enabled;
+                base.models = dedup_models(existing_provider.models.clone());
+                enabled = existing_provider.enabled;
+            }
+
+            let mut available_models = if base.models.is_empty() {
+                (*kind).default_models()
+            } else {
+                base.models.clone()
+            };
+            let active_models = base.models.clone();
+
+            if available_models.is_empty() {
+                available_models = (*kind).default_models();
             }
 
             SetupProviderEntry {
                 kind: *kind,
-                selected,
+                enabled,
                 api_key: base.api_key.unwrap_or_default(),
                 base_url: base.base_url,
                 auth: base.auth,
-                models: base.models,
+                available_models: dedup_models(available_models),
+                active_models: dedup_models(active_models),
+                runtime_ready: None,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    // Route config has highest priority for active models.
+    for route in &config.models.executor_routes {
+        if route.model.trim().is_empty() {
+            continue;
+        }
+        if let Some(entry) = entries.iter_mut().find(|e| e.kind == route.provider) {
+            if !entry.available_models.iter().any(|m| m == &route.model) {
+                entry.available_models.push(route.model.clone());
+            }
+            if !entry.active_models.iter().any(|m| m == &route.model) {
+                entry.active_models.push(route.model.clone());
+            }
+            entry.enabled = true;
+        }
+    }
+
+    for entry in &mut entries {
+        entry.available_models = dedup_models(entry.available_models.clone());
+        entry.active_models = dedup_models(entry.active_models.clone());
+        if entry.enabled && entry.active_models.is_empty() && !entry.available_models.is_empty() {
+            entry.active_models.push(entry.available_models[0].clone());
+        }
+    }
+
+    entries
+}
+
+fn dedup_models(models: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in models {
+        let m = m.trim();
+        if m.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|x: &String| x == m) {
+            out.push(m.to_string());
+        }
+    }
+    out
+}
+
+fn model_route_display(route: &ModelRouteDraft, providers: &[SetupProviderEntry]) -> String {
+    let provider_name = providers
+        .get(route.provider_idx)
+        .map(|p| p.name().to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+    format!("{} ({})", route.model, provider_name)
 }

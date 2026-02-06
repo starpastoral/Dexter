@@ -1,4 +1,4 @@
-use crate::config::{ProviderAuth, ProviderConfig, ProviderKind};
+use crate::config::{ModelRoute, ProviderAuth, ProviderConfig, ProviderKind};
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -111,50 +111,60 @@ impl LlmClient {
         primary_model: String,
         fallback_models: Vec<String>,
     ) -> Self {
+        Self::with_routes(providers, Vec::new(), primary_model, fallback_models)
+    }
+
+    pub fn with_routes(
+        providers: Vec<ProviderConfig>,
+        routes: Vec<ModelRoute>,
+        primary_model: String,
+        fallback_models: Vec<String>,
+    ) -> Self {
         let provider_defs: Vec<ProviderConfig> = providers
             .into_iter()
             .map(ProviderConfig::normalized)
             .filter(|p| p.is_configured())
             .collect();
 
-        let mut global_models = Vec::new();
-        if let Some(m) = clean_optional(primary_model) {
-            global_models.push(m);
-        }
-        for m in fallback_models {
-            if let Some(clean) = clean_optional(m) {
-                if !global_models.iter().any(|x| x == &clean) {
-                    global_models.push(clean);
-                }
-            }
-        }
-
         let mut targets = Vec::new();
         let mut seen = HashSet::new();
 
-        // First pass: global model preference across providers.
-        for model in &global_models {
-            for p in &provider_defs {
-                let t = target_from_provider(p, model.clone());
-                if seen.insert(target_key(&t)) {
-                    targets.push(t);
+        // First priority: explicit provider+model route order.
+        if !routes.is_empty() {
+            for route in routes {
+                let model = route.model.trim();
+                if model.is_empty() {
+                    continue;
+                }
+                if let Some(provider) = provider_defs.iter().find(|p| p.kind == route.provider) {
+                    let t = target_from_provider(provider, model.to_string());
+                    if seen.insert(target_key(&t)) {
+                        targets.push(t);
+                    }
                 }
             }
         }
 
-        // Second pass: provider-specific model lists as extra fallbacks.
-        for p in &provider_defs {
-            for m in &p.models {
-                let clean_model = m.trim();
-                if clean_model.is_empty() {
-                    continue;
-                }
-                if global_models.iter().any(|gm| gm == clean_model) {
-                    continue;
-                }
-                let t = target_from_provider(p, clean_model.to_string());
-                if seen.insert(target_key(&t)) {
-                    targets.push(t);
+        // If explicit routes are missing/empty, fallback to legacy model flow.
+        if targets.is_empty() {
+            targets = build_targets_from_legacy_models(
+                &provider_defs,
+                primary_model,
+                fallback_models,
+                &mut seen,
+            );
+        } else {
+            // Add provider-local model candidates behind explicit routes.
+            for p in &provider_defs {
+                for m in &p.models {
+                    let clean_model = m.trim();
+                    if clean_model.is_empty() {
+                        continue;
+                    }
+                    let t = target_from_provider(p, clean_model.to_string());
+                    if seen.insert(target_key(&t)) {
+                        targets.push(t);
+                    }
                 }
             }
         }
@@ -175,7 +185,58 @@ impl LlmClient {
             cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
     }
+}
 
+fn build_targets_from_legacy_models(
+    provider_defs: &[ProviderConfig],
+    primary_model: String,
+    fallback_models: Vec<String>,
+    seen: &mut HashSet<String>,
+) -> Vec<LlmTarget> {
+    let mut targets = Vec::new();
+    let mut global_models = Vec::new();
+    if let Some(m) = clean_optional(primary_model) {
+        global_models.push(m);
+    }
+    for m in fallback_models {
+        if let Some(clean) = clean_optional(m) {
+            if !global_models.iter().any(|x| x == &clean) {
+                global_models.push(clean);
+            }
+        }
+    }
+
+    // First pass: global model preference across providers.
+    for model in &global_models {
+        for p in provider_defs {
+            let t = target_from_provider(p, model.clone());
+            if seen.insert(target_key(&t)) {
+                targets.push(t);
+            }
+        }
+    }
+
+    // Second pass: provider-specific model lists as extra fallbacks.
+    for p in provider_defs {
+        for m in &p.models {
+            let clean_model = m.trim();
+            if clean_model.is_empty() {
+                continue;
+            }
+            if global_models.iter().any(|gm| gm == clean_model) {
+                continue;
+            }
+            let t = target_from_provider(p, clean_model.to_string());
+            if seen.insert(target_key(&t)) {
+                targets.push(t);
+            }
+        }
+    }
+
+    targets
+}
+
+impl LlmClient {
     pub async fn completion(&self, system_prompt: &str, user_input: &str) -> Result<String> {
         self.completion_with_policy(system_prompt, user_input, CachePolicy::Normal)
             .await
@@ -519,7 +580,7 @@ fn infer_provider_kind(base_url: &str) -> ProviderKind {
     if lower.contains("generativelanguage.googleapis.com") || lower.contains("googleapis.com") {
         ProviderKind::Gemini
     } else if lower.contains("deepseek.com") {
-        ProviderKind::DeepSeek
+        ProviderKind::Deepseek
     } else if lower.contains("groq.com") {
         ProviderKind::Groq
     } else if lower.contains("baseten.co") {
