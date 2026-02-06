@@ -46,7 +46,9 @@ struct RouterResponse {
 
 #[derive(Debug, Deserialize)]
 struct RouterClarify {
-    question: String,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
     options: Vec<RouterClarifyOption>,
 }
 
@@ -158,9 +160,6 @@ Rules:
             if let Some(outcome) = validate_llm_clarify(clarify) {
                 return Ok(outcome);
             }
-            return Ok(RouteOutcome::Unsupported {
-                reason: "Need more details to proceed. Please clarify your intent.".to_string(),
-            });
         }
 
         let plugin_name = router_resp
@@ -256,6 +255,11 @@ fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
 }
 
 fn validate_llm_clarify(clarify: RouterClarify) -> Option<RouteOutcome> {
+    let question = clarify.question?.trim().to_string();
+    if question.is_empty() || question.len() > 120 {
+        return None;
+    }
+
     if clarify.options.len() < 2 || clarify.options.len() > 4 {
         return None;
     }
@@ -284,7 +288,7 @@ fn validate_llm_clarify(clarify: RouterClarify) -> Option<RouteOutcome> {
     }
 
     Some(RouteOutcome::Clarify {
-        question: clarify.question,
+        question,
         options,
         source: ClarifySource::LLM,
     })

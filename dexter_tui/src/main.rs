@@ -1300,34 +1300,42 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let compact_width = area.width < 100;
+    let very_narrow_width = area.width < 80;
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // 1. Title/Header
-            Constraint::Length(5), // 2. Proposal
-            Constraint::Length(1), // 3. Buttons
-            Constraint::Min(1),    // 4. Output
-            Constraint::Length(2), // 5. Footer (MODE/MODEL/PROVIDER)
-        ])
-        .split(f.area());
+        .constraints(main_layout_constraints(area))
+        .split(area);
 
     let block_style = app.theme.base_style;
     let border_style = app.theme.border_style;
 
     // --- SECTION 1: TITLE (HEADER) ---
-    let header_text = Line::from(vec![
-        Span::styled(" D E X T E R ", app.theme.header_title_style),
-        Span::styled(
-            " // AI COMMAND INTERFACE v0.1 ",
-            app.theme.header_subtitle_style,
-        ),
-    ]);
+    let header_text = if very_narrow_width {
+        Line::from(vec![
+            Span::styled(" DEXTER ", app.theme.header_title_style),
+            Span::styled(" // AI CLI ", app.theme.header_subtitle_style),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" D E X T E R ", app.theme.header_title_style),
+            Span::styled(
+                " // AI COMMAND INTERFACE v0.1 ",
+                app.theme.header_subtitle_style,
+            ),
+        ])
+    };
 
     let header = Paragraph::new(header_text).style(block_style).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(" SYSTEM STATUS: ONLINE "),
+            .title(if very_narrow_width {
+                " STATUS: ONLINE "
+            } else {
+                " SYSTEM STATUS: ONLINE "
+            }),
     );
     f.render_widget(header, main_layout[0]);
 
@@ -1488,10 +1496,63 @@ fn ui(f: &mut Frame, app: &mut App) {
     f.render_widget(&footer_block, main_layout[4]);
     let footer_inner = footer_block.inner(main_layout[4]);
     app.settings_button_rect = None;
-    let settings_label = " [SETTINGS] ";
+    let settings_label = if very_narrow_width {
+        " [SET] "
+    } else {
+        " [SETTINGS] "
+    };
     let settings_width = settings_label.len() as u16;
 
-    if footer_inner.width > settings_width {
+    if compact_width && footer_inner.height >= 2 {
+        let footer_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(footer_inner);
+
+        let top = if footer_rows.is_empty() {
+            footer_inner
+        } else {
+            footer_rows[0]
+        };
+        let bottom = if footer_rows.len() > 1 {
+            footer_rows[1]
+        } else {
+            footer_inner
+        };
+
+        if top.width > settings_width {
+            let top_split = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1), Constraint::Length(settings_width)])
+                .split(top);
+            let line1 = Line::from(vec![
+                Span::styled(" MODE: ", app.theme.footer_text_style),
+                Span::styled(&state_name, app.theme.footer_highlight_style),
+                Span::styled("  PROVIDER: ", app.theme.footer_text_style),
+                Span::styled(&provider_name, app.theme.footer_highlight_style),
+            ]);
+            let info = Paragraph::new(vec![line1]).style(block_style);
+            f.render_widget(info, top_split[0]);
+
+            let settings_button = Paragraph::new(settings_label).style(app.theme.footer_key_style);
+            f.render_widget(settings_button, top_split[1]);
+            app.settings_button_rect = Some(top_split[1]);
+        } else {
+            let settings_button = Paragraph::new(settings_label).style(app.theme.footer_key_style);
+            f.render_widget(settings_button, top);
+            app.settings_button_rect = Some(top);
+        }
+
+        let line2 = Line::from(vec![
+            Span::styled(" MODEL: ", app.theme.footer_text_style),
+            Span::styled(
+                &app.config.models.executor_model,
+                app.theme.footer_highlight_style,
+            ),
+        ]);
+        let model_info = Paragraph::new(vec![line2]).style(block_style);
+        f.render_widget(model_info, bottom);
+    } else if footer_inner.width > settings_width {
         let footer_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(settings_width)])
@@ -1531,6 +1592,53 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
+fn main_layout_constraints(area: Rect) -> [Constraint; 5] {
+    let short_height = area.height < 24;
+    let compact_width = area.width < 100;
+    let proposal_height = if short_height { 4 } else { 5 };
+    let footer_height = if compact_width { 3 } else { 2 };
+    [
+        Constraint::Length(3),               // 1. Title/Header
+        Constraint::Length(proposal_height), // 2. Proposal
+        Constraint::Length(1),               // 3. Buttons
+        Constraint::Min(1),                  // 4. Output
+        Constraint::Length(footer_height),   // 5. Footer
+    ]
+}
+
+fn compact_button_label(label: &str) -> String {
+    match label {
+        "SUBMIT" => "GO".to_string(),
+        "CLEAR" => "CLR".to_string(),
+        "DEBUG:ON" => "DBG:ON".to_string(),
+        "DEBUG:OFF" => "DBG:OFF".to_string(),
+        "EXECUTE" => "RUN".to_string(),
+        "EDIT CMD" => "EDIT".to_string(),
+        "EDIT INPUT" => "INPUT".to_string(),
+        "PREVIEW" => "PREV".to_string(),
+        "REGENERATE" => "REGEN".to_string(),
+        other => {
+            if other.chars().count() > 8 {
+                other.chars().take(8).collect()
+            } else {
+                other.to_string()
+            }
+        }
+    }
+}
+
+fn button_row_width(buttons: &[(FooterAction, String)]) -> u16 {
+    let mut width = 0u16;
+    for (idx, (_, label)) in buttons.iter().enumerate() {
+        let token_width = label.chars().count() as u16 + 4; // " [label] "
+        width = width.saturating_add(token_width);
+        if idx + 1 < buttons.len() {
+            width = width.saturating_add(1); // layout spacing
+        }
+    }
+    width
+}
+
 fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // Reuse existing button rendering (with mouse hitboxes), but position the bar
     // between the input and output panes per the new UI layout.
@@ -1548,10 +1656,37 @@ fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
         app.footer_focus = 0;
     }
 
-    let mut display_texts: Vec<String> = Vec::with_capacity(specs.len());
-    let mut actions: Vec<FooterAction> = Vec::with_capacity(specs.len());
-    let mut constraints: Vec<Constraint> = Vec::with_capacity(specs.len());
-    for (action, label) in specs.into_iter() {
+    let compact = area.width < 88;
+    let mut candidates: Vec<(FooterAction, String)> = specs
+        .into_iter()
+        .map(|(action, label)| {
+            let rendered = if compact {
+                compact_button_label(&label)
+            } else {
+                label
+            };
+            (action, rendered)
+        })
+        .collect();
+    while !candidates.is_empty() && button_row_width(&candidates) > area.width {
+        candidates.pop();
+    }
+    if candidates.is_empty() {
+        app.footer_buttons.clear();
+        app.footer_focus = 0;
+        if app.focus == FocusArea::FooterButtons {
+            app.focus = FocusArea::Proposal;
+        }
+        return;
+    }
+    if app.footer_focus >= candidates.len() {
+        app.footer_focus = 0;
+    }
+
+    let mut display_texts: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut actions: Vec<FooterAction> = Vec::with_capacity(candidates.len());
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(candidates.len());
+    for (action, label) in candidates {
         let t = format!(" [{}] ", label);
         constraints.push(Constraint::Length(t.len() as u16));
         display_texts.push(t);
@@ -2409,13 +2544,7 @@ fn update_output_scroll_bounds(
 
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // 1. Title/Header
-            Constraint::Length(5), // 2. Proposal
-            Constraint::Length(1), // 3. Buttons
-            Constraint::Min(1),    // 4. Output
-            Constraint::Length(2), // 5. Footer
-        ])
+        .constraints(main_layout_constraints(area))
         .split(area);
 
     let output_viewport_height = main_layout[3].height.saturating_sub(2); // subtract borders
@@ -3203,6 +3332,14 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
         render_setup_provider_table(f, app, chunks[1]);
         return;
     }
+    if app.state == SetupState::ProviderModelSelection {
+        render_setup_models_table(f, app, chunks[1]);
+        return;
+    }
+    if app.state == SetupState::ModelOrderSelection {
+        render_setup_model_order_table(f, app, chunks[1]);
+        return;
+    }
 
     let content_text = match &app.state {
         SetupState::Welcome => vec![
@@ -3522,11 +3659,13 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
         .title(" SETUP WIZARD ");
     f.render_widget(&block, area);
     let inner = block.inner(area);
+    let compact = inner.width < 98;
+    let very_narrow = inner.width < 78;
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7), // title + help
+            Constraint::Length(if compact { 8 } else { 7 }), // title + help
             Constraint::Length(1),
             Constraint::Length((app.providers.len() as u16).saturating_add(2)), // header + rows
             Constraint::Min(1),
@@ -3535,12 +3674,20 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
 
     let intro = vec![
         Line::from(Span::styled(
-            "STEP 1: PROVIDERS (ENTER TO CONFIGURE SELECTED PROVIDER)",
+            if very_narrow {
+                "STEP 1: PROVIDERS"
+            } else {
+                "STEP 1: PROVIDERS (ENTER TO CONFIGURE SELECTED PROVIDER)"
+            },
             app.theme.header_title_style,
         )),
         Line::from(""),
         Line::from("SPACE: Toggle provider enabled/disabled for runtime fallback"),
-        Line::from("ENTER: Continue to providers config"),
+        Line::from(if very_narrow {
+            "ENTER: Continue setup"
+        } else {
+            "ENTER: Continue to providers config"
+        }),
         Line::from("OFF providers keep model selections saved but not active at runtime."),
     ];
     let intro_para = Paragraph::new(intro)
@@ -3550,10 +3697,14 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
 
     let header = Row::new(vec![
         Cell::from("  "),
-        Cell::from("TOGGLE"),
+        Cell::from(if very_narrow { "ON/OFF" } else { "TOGGLE" }),
         Cell::from("PROVIDER"),
         Cell::from("SETUP"),
-        Cell::from("ACTIVE MODELS"),
+        Cell::from(if very_narrow {
+            "ACTIVE"
+        } else {
+            "ACTIVE MODELS"
+        }),
     ])
     .style(app.theme.footer_text_style.add_modifier(Modifier::BOLD));
 
@@ -3604,21 +3755,284 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
+    let table_widths = if very_narrow {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Min(8),
+            Constraint::Length(8),
+            Constraint::Length(6),
+        ]
+    } else if compact {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(8),
+            Constraint::Min(10),
+            Constraint::Length(10),
+            Constraint::Length(8),
+        ]
+    } else {
+        vec![
             Constraint::Length(2),
             Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(14),
-        ],
-    )
-    .header(header)
-    .column_spacing(1)
-    .style(app.theme.base_style);
+        ]
+    };
+    let table = Table::new(rows, table_widths)
+        .header(header)
+        .column_spacing(1)
+        .style(app.theme.base_style);
 
     f.render_widget(table, layout[2]);
+}
+
+fn render_setup_models_table(f: &mut Frame, app: &SetupApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style)
+        .title(" SETUP WIZARD ");
+    f.render_widget(&block, area);
+    let inner = block.inner(area);
+
+    let Some(provider_idx) = app.config_provider_idx else {
+        let fallback = Paragraph::new("STEP 3: MODELS TOGGLE\n\nNo provider selected.")
+            .style(app.theme.header_subtitle_style);
+        f.render_widget(fallback, inner);
+        return;
+    };
+    let provider = &app.providers[provider_idx];
+    let compact = inner.width < 98;
+    let very_narrow = inner.width < 78;
+    let total = app.guided_provider_order.len().max(1);
+    let current = app.guided_provider_pos + 1;
+    let table_height = (provider.available_models.len() as u16).saturating_add(3);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if compact { 7 } else { 6 }),
+            Constraint::Length(1),
+            Constraint::Length(table_height),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let intro = vec![
+        Line::from(Span::styled(
+            format!("STEP 3: MODELS TOGGLE ({}/{})", current, total),
+            app.theme.header_title_style,
+        )),
+        Line::from(""),
+        Line::from(format!("Provider: {}", provider.name())),
+        Line::from(if very_narrow {
+            "Select models for runtime fallback."
+        } else {
+            "Select one or more models to activate for fallback."
+        }),
+    ];
+    let intro_para = Paragraph::new(intro)
+        .style(app.theme.header_subtitle_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(intro_para, layout[0]);
+
+    let header = Row::new(vec![
+        Cell::from("  "),
+        Cell::from(if very_narrow { "ON/OFF" } else { "TOGGLE" }),
+        Cell::from("MODEL"),
+    ])
+    .style(app.theme.footer_text_style.add_modifier(Modifier::BOLD));
+
+    let mut rows: Vec<Row> = provider
+        .available_models
+        .iter()
+        .enumerate()
+        .map(|(idx, model)| {
+            let is_cursor = idx == app.provider_model_cursor;
+            let selected = provider.active_models.iter().any(|m| m == model);
+            let toggle = if selected { "◉ ON" } else { "○ OFF" };
+            Row::new(vec![
+                Cell::from(if is_cursor { "> " } else { "  " }),
+                Cell::from(toggle),
+                Cell::from(model.to_string()),
+            ])
+            .style(if is_cursor {
+                app.theme.proposal_cmd_style
+            } else {
+                app.theme.header_subtitle_style
+            })
+        })
+        .collect();
+
+    let all_selected = !provider.available_models.is_empty()
+        && provider.active_models.len() == provider.available_models.len();
+    let select_all_cursor = app.provider_model_cursor == provider.available_models.len();
+    rows.push(
+        Row::new(vec![
+            Cell::from(if select_all_cursor { "> " } else { "  " }),
+            Cell::from(if all_selected { "◉ ON" } else { "○ OFF" }),
+            Cell::from("Select All"),
+        ])
+        .style(if select_all_cursor {
+            app.theme.proposal_cmd_style
+        } else {
+            app.theme.header_subtitle_style
+        }),
+    );
+
+    let table_widths = if very_narrow {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Min(8),
+        ]
+    } else if compact {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(8),
+            Constraint::Min(12),
+        ]
+    } else {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(8),
+            Constraint::Min(20),
+        ]
+    };
+    let table = Table::new(rows, table_widths)
+        .header(header)
+        .column_spacing(1)
+        .style(app.theme.base_style);
+    f.render_widget(table, layout[2]);
+
+    let help = Paragraph::new(if very_narrow {
+        "SPACE: Toggle / Select All   ENTER: Save & Next"
+    } else {
+        "SPACE: Toggle model / Select All   ENTER: Save & Next"
+    })
+    .style(app.theme.header_subtitle_style)
+    .wrap(Wrap { trim: true });
+    f.render_widget(help, layout[3]);
+}
+
+fn render_setup_model_order_table(f: &mut Frame, app: &SetupApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style)
+        .title(" SETUP WIZARD ");
+    f.render_widget(&block, area);
+    let inner = block.inner(area);
+    let compact = inner.width < 98;
+    let very_narrow = inner.width < 78;
+
+    let table_height = if app.model_order.is_empty() {
+        3
+    } else {
+        (app.model_order.len() as u16).saturating_add(2)
+    };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if compact { 8 } else { 7 }),
+            Constraint::Length(1),
+            Constraint::Length(table_height),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let intro = vec![
+        Line::from(Span::styled(
+            "STEP 4: ALL MODELS CONFIRMATION / FALLBACK ORDER",
+            app.theme.header_title_style,
+        )),
+        Line::from(""),
+        Line::from("Primary model = top item. Fallbacks follow in order."),
+        Line::from(if very_narrow {
+            "U/K: move up   D/J: move down"
+        } else {
+            "Use U/K to move up, D/J to move down."
+        }),
+    ];
+    let intro_para = Paragraph::new(intro)
+        .style(app.theme.header_subtitle_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(intro_para, layout[0]);
+
+    let header = Row::new(vec![
+        Cell::from("  "),
+        Cell::from("ORDER"),
+        Cell::from("MODEL"),
+        Cell::from(if very_narrow { "PROV" } else { "PROVIDER" }),
+    ])
+    .style(app.theme.footer_text_style.add_modifier(Modifier::BOLD));
+
+    let rows = if app.model_order.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("  "),
+            Cell::from("--"),
+            Cell::from("No active models selected yet."),
+            Cell::from("--"),
+        ])
+        .style(Style::default().fg(Color::Red))]
+    } else {
+        app.model_order
+            .iter()
+            .enumerate()
+            .map(|(idx, route)| {
+                let is_cursor = idx == app.model_order_cursor;
+                let provider = app
+                    .providers
+                    .get(route.provider_idx)
+                    .map(|p| p.name().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                Row::new(vec![
+                    Cell::from(if is_cursor { "> " } else { "  " }),
+                    Cell::from(format!("[{}]", idx + 1)),
+                    Cell::from(route.model.clone()),
+                    Cell::from(provider),
+                ])
+                .style(if is_cursor {
+                    app.theme.proposal_cmd_style
+                } else {
+                    app.theme.header_subtitle_style
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let table_widths = if very_narrow {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Min(10),
+            Constraint::Length(8),
+        ]
+    } else if compact {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Min(16),
+            Constraint::Length(10),
+        ]
+    } else {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Min(24),
+            Constraint::Length(12),
+        ]
+    };
+    let table = Table::new(rows, table_widths)
+        .header(header)
+        .column_spacing(1)
+        .style(app.theme.base_style);
+    f.render_widget(table, layout[2]);
+
+    let help = Paragraph::new("ENTER: Save & Leave   ESC: Back to Step 1")
+        .style(app.theme.header_subtitle_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(help, layout[3]);
 }
 
 fn build_provider_entries(config: &Config) -> Vec<SetupProviderEntry> {
