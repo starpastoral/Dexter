@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use regex::Regex;
 
 pub struct SafetyGuard {
@@ -30,13 +30,18 @@ impl SafetyGuard {
 
         for pattern in &self.blacklist_patterns {
             if pattern.is_match(trimmed) {
-                return Err(anyhow!("Command blocked by safety guard. Pattern matched: {}", pattern));
+                return Err(anyhow!(
+                    "Command blocked by safety guard. Pattern matched: {}",
+                    pattern
+                ));
             }
         }
-        
+
         // Additional heuristic: blocked characters
         if trimmed.contains(" > /dev/") || trimmed.contains(" > /sys/") {
-             return Err(anyhow!("Command blocked: potentially destructive redirection"));
+            return Err(anyhow!(
+                "Command blocked: potentially destructive redirection"
+            ));
         }
 
         Ok(())
@@ -50,7 +55,7 @@ mod tests {
     #[test]
     fn test_safety_blacklist() {
         let guard = SafetyGuard::default();
-        
+
         assert!(guard.check("ls -la").is_ok());
         assert!(guard.check("rm -rf /").is_err());
         assert!(guard.check("sudo rm something").is_err());

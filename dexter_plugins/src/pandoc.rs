@@ -9,8 +9,9 @@ pub struct PandocPlugin;
 
 fn strip_surrounding_quotes(value: &str) -> &str {
     let bytes = value.as_bytes();
-    if bytes.len() >= 2 && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-        || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
     {
         &value[1..value.len() - 1]
     } else {
@@ -31,8 +32,7 @@ fn extract_output_path(cmd: &str) -> Option<String> {
 
     // Support: -oout.ext (no space)
     static OUTPUT_COMPACT_RE: OnceLock<Regex> = OnceLock::new();
-    let compact_re = OUTPUT_COMPACT_RE
-        .get_or_init(|| Regex::new(r#"(?i)(^|\s)-o(\S+)"#).unwrap());
+    let compact_re = OUTPUT_COMPACT_RE.get_or_init(|| Regex::new(r#"(?i)(^|\s)-o(\S+)"#).unwrap());
     let caps = compact_re.captures(cmd)?;
     let raw = caps.get(2)?.as_str();
     Some(strip_surrounding_quotes(raw).to_string())
@@ -50,9 +50,8 @@ fn validate_pandoc_command(cmd: &str) -> bool {
     }
 
     static BANNED_ARGS_RE: OnceLock<Regex> = OnceLock::new();
-    let banned_args_re = BANNED_ARGS_RE.get_or_init(|| {
-        Regex::new(r"(?i)(^|\s)--(lua-)?filter(\s|=|$)").unwrap()
-    });
+    let banned_args_re =
+        BANNED_ARGS_RE.get_or_init(|| Regex::new(r"(?i)(^|\s)--(lua-)?filter(\s|=|$)").unwrap());
     if banned_args_re.is_match(trimmed) {
         return false;
     }
@@ -226,9 +225,15 @@ mod tests {
 
     #[test]
     fn validate_rejects_shell_chains_and_redirection() {
-        assert!(!validate_pandoc_command("pandoc input.md -o out.html | cat"));
-        assert!(!validate_pandoc_command("pandoc input.md -t html > out.html"));
-        assert!(!validate_pandoc_command("pandoc input.md -o out.html && echo ok"));
+        assert!(!validate_pandoc_command(
+            "pandoc input.md -o out.html | cat"
+        ));
+        assert!(!validate_pandoc_command(
+            "pandoc input.md -t html > out.html"
+        ));
+        assert!(!validate_pandoc_command(
+            "pandoc input.md -o out.html && echo ok"
+        ));
     }
 
     #[test]

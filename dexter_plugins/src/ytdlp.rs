@@ -160,8 +160,7 @@ Your goal is to generate a valid `yt-dlp` command.
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
 
-        let progress_re =
-            Arc::new(Regex::new(r"(?i)\b(\d{1,3}(?:\.\d+)?)%\b").unwrap());
+        let progress_re = Arc::new(Regex::new(r"(?i)\b(\d{1,3}(?:\.\d+)?)%\b").unwrap());
 
         let tx_err = progress_tx.clone();
         let re_err = progress_re.clone();

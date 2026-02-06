@@ -197,11 +197,21 @@ fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
 
     if has_media && has_doc {
         return Some(RouteOutcome::Unsupported {
-            reason: "Audio/video formats can’t be converted into document formats (e.g., mp3 → html).".to_string(),
+            reason:
+                "Audio/video formats can’t be converted into document formats (e.g., mp3 → html)."
+                    .to_string(),
         });
     }
 
-    let rename_keywords = ["rename", "renaming", "change extension", "rename to", "rename as", "改名", "重命名"];
+    let rename_keywords = [
+        "rename",
+        "renaming",
+        "change extension",
+        "rename to",
+        "rename as",
+        "改名",
+        "重命名",
+    ];
     let convert_keywords = ["convert", "conversion", "transcode", "转成", "转换"];
     let has_rename = contains_any(&lower, &rename_keywords);
     let has_convert = contains_any(&lower, &convert_keywords) || lower.contains("->");
@@ -229,7 +239,10 @@ fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
                 id: "convert_format".to_string(),
                 label: "Convert format".to_string(),
                 detail: "Transcode the media to the new format.".to_string(),
-                resolved_intent: format!("convert media format from {} to {}", src_label, dst_label),
+                resolved_intent: format!(
+                    "convert media format from {} to {}",
+                    src_label, dst_label
+                ),
             },
         ];
         return Some(RouteOutcome::Clarify {
@@ -261,9 +274,7 @@ fn validate_llm_clarify(clarify: RouterClarify) -> Option<RouteOutcome> {
         if has_forbidden_chars(&opt.resolved_intent) {
             return None;
         }
-        let id = opt
-            .id
-            .unwrap_or_else(|| format!("option_{}", i + 1));
+        let id = opt.id.unwrap_or_else(|| format!("option_{}", i + 1));
         options.push(ClarifyOption {
             id,
             label: opt.label,
@@ -359,7 +370,5 @@ fn doc_extensions() -> HashSet<&'static str> {
 }
 
 fn image_extensions() -> HashSet<&'static str> {
-    ["png", "jpg", "jpeg", "gif", "webp"]
-        .into_iter()
-        .collect()
+    ["png", "jpg", "jpeg", "gif", "webp"].into_iter().collect()
 }

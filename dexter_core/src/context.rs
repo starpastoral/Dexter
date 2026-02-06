@@ -64,7 +64,7 @@ mod tests {
     async fn test_scan_cwd_limits() -> Result<()> {
         let dir = tempdir()?;
         let dir_path = dir.path();
-        
+
         // Create 25 files
         for i in 0..25 {
             File::create(dir_path.join(format!("file_{}.txt", i)))?;
@@ -75,7 +75,7 @@ mod tests {
         std::env::set_current_dir(dir_path)?;
 
         let context = ContextScanner::scan_cwd().await?;
-        
+
         assert_eq!(context.files.len(), 20); // Limit is 20
         assert!(context.summary.is_some());
         assert!(context.summary.unwrap().contains("25 files"));

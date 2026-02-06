@@ -1,7 +1,8 @@
+use crate::config::{ProviderAuth, ProviderConfig, ProviderKind};
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -16,11 +17,19 @@ pub enum CachePolicy {
 #[derive(Debug, Clone)]
 pub struct LlmClient {
     http_client: Client,
-    api_key: String,
-    base_url: String,
-    model: String,
+    targets: Vec<LlmTarget>,
     cache: Arc<RwLock<HashMap<String, String>>>,
     cache_capacity: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LlmTarget {
+    provider_name: String,
+    kind: ProviderKind,
+    api_key: Option<String>,
+    base_url: String,
+    auth: ProviderAuth,
+    model: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,23 +59,118 @@ struct ChatResponse {
 
 #[derive(Debug, Deserialize)]
 struct ModelListData {
-    models: Option<Vec<Model>>, // Gemini style
-    data: Option<Vec<Model>>,   // OpenAI/DeepSeek style
+    models: Option<Vec<Model>>, // Gemini and Ollama style
+    data: Option<Vec<Model>>,   // OpenAI style
 }
 
 #[derive(Debug, Deserialize)]
 struct Model {
     id: Option<String>,   // OpenAI style
-    name: Option<String>, // Gemini style
+    name: Option<String>, // Gemini/Ollama style
 }
 
 impl LlmClient {
     pub fn new(api_key: String, base_url: String, model: String) -> Self {
+        let kind = infer_provider_kind(&base_url);
+        let api_key = clean_optional(api_key);
+        let auth = match kind {
+            ProviderKind::Baseten => {
+                if api_key.is_some() {
+                    ProviderAuth::ApiKey
+                } else {
+                    ProviderAuth::None
+                }
+            }
+            ProviderKind::Ollama => ProviderAuth::None,
+            _ => {
+                if api_key.is_some() {
+                    ProviderAuth::Bearer
+                } else {
+                    ProviderAuth::None
+                }
+            }
+        };
+
         Self {
             http_client: Client::new(),
-            api_key,
-            base_url,
-            model,
+            targets: vec![LlmTarget {
+                provider_name: kind.display_name().to_string(),
+                kind,
+                api_key,
+                base_url: base_url.trim().trim_end_matches('/').to_string(),
+                auth,
+                model: model.trim().to_string(),
+            }],
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache_capacity: DEFAULT_CACHE_CAPACITY,
+        }
+    }
+
+    pub fn with_fallbacks(
+        providers: Vec<ProviderConfig>,
+        primary_model: String,
+        fallback_models: Vec<String>,
+    ) -> Self {
+        let provider_defs: Vec<ProviderConfig> = providers
+            .into_iter()
+            .map(ProviderConfig::normalized)
+            .filter(|p| p.is_configured())
+            .collect();
+
+        let mut global_models = Vec::new();
+        if let Some(m) = clean_optional(primary_model) {
+            global_models.push(m);
+        }
+        for m in fallback_models {
+            if let Some(clean) = clean_optional(m) {
+                if !global_models.iter().any(|x| x == &clean) {
+                    global_models.push(clean);
+                }
+            }
+        }
+
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+
+        // First pass: global model preference across providers.
+        for model in &global_models {
+            for p in &provider_defs {
+                let t = target_from_provider(p, model.clone());
+                if seen.insert(target_key(&t)) {
+                    targets.push(t);
+                }
+            }
+        }
+
+        // Second pass: provider-specific model lists as extra fallbacks.
+        for p in &provider_defs {
+            for m in &p.models {
+                let clean_model = m.trim();
+                if clean_model.is_empty() {
+                    continue;
+                }
+                if global_models.iter().any(|gm| gm == clean_model) {
+                    continue;
+                }
+                let t = target_from_provider(p, clean_model.to_string());
+                if seen.insert(target_key(&t)) {
+                    targets.push(t);
+                }
+            }
+        }
+
+        // Last resort for runtime resilience.
+        if targets.is_empty() {
+            let fallback_provider = ProviderConfig::builtin(ProviderKind::Ollama, None);
+            targets.push(target_from_provider(
+                &fallback_provider,
+                "llama3.2".to_string(),
+            ));
+        }
+
+        Self {
+            http_client: Client::new(),
+            targets,
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
@@ -83,38 +187,35 @@ impl LlmClient {
         user_input: &str,
         cache_policy: CachePolicy,
     ) -> Result<String> {
-        let is_gemini = self.base_url.contains("generativelanguage.googleapis.com");
+        let mut errors = Vec::new();
+        for target in &self.targets {
+            let messages = build_messages(target, system_prompt, user_input);
+            match self
+                .execute_completion_for_target(target, messages, cache_policy)
+                .await
+            {
+                Ok(content) => return Ok(content),
+                Err(e) => errors.push(format!(
+                    "- [{} | {}] {}",
+                    target.provider_name, target.model, e
+                )),
+            }
+        }
 
-        // If it's Gemini, we often get better results or avoid safety refusals by
-        // putting the "System" instructions at the start of the User message.
-        let messages = if is_gemini {
-            vec![ChatMessage {
-                role: "user".to_string(),
-                content: format!("{}\n\n### USER INPUT:\n{}", system_prompt, user_input),
-            }]
-        } else {
-            vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: system_prompt.to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: user_input.to_string(),
-                },
-            ]
-        };
-
-        self.execute_completion(messages, cache_policy).await
+        Err(anyhow!(
+            "All configured providers/models failed:\n{}",
+            errors.join("\n")
+        ))
     }
 
-    async fn execute_completion(
+    async fn execute_completion_for_target(
         &self,
+        target: &LlmTarget,
         messages: Vec<ChatMessage>,
         cache_policy: CachePolicy,
     ) -> Result<String> {
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let cache_key = self.build_cache_key(&messages, 0.1)?;
+        let url = format!("{}/chat/completions", target.base_url.trim_end_matches('/'));
+        let cache_key = self.build_cache_key(target, &messages, 0.1)?;
 
         if cache_policy == CachePolicy::Normal {
             if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
@@ -123,25 +224,42 @@ impl LlmClient {
         }
 
         let request_body = ChatRequest {
-            model: self.model.clone(),
+            model: target.model.clone(),
             messages,
             temperature: 0.1,
         };
 
-        let response = self
+        let mut request = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+            .header("Content-Type", "application/json");
+        request = apply_auth_header(request, target)?;
+        let response = request.json(&request_body).send().await?;
 
         let status = response.status();
         let text = response.text().await?;
 
         if !status.is_success() {
-            return Err(anyhow!("LLM API Error (Status {}): {}", status, text));
+            let lower = text.to_lowercase();
+            let hint = if status.as_u16() == 429
+                || lower.contains("rate limit")
+                || lower.contains("quota")
+            {
+                " (quota/rate-limit, trying fallback)"
+            } else if lower.contains("content_filter")
+                || lower.contains("safety")
+                || lower.contains("blocked")
+            {
+                " (content policy block, trying fallback)"
+            } else {
+                ""
+            };
+            return Err(anyhow!(
+                "LLM API Error (Status {}): {}{}",
+                status,
+                truncate_error(&text),
+                hint
+            ));
         }
 
         let chat_response: ChatResponse = serde_json::from_str(&text).map_err(|e| {
@@ -159,8 +277,6 @@ impl LlmClient {
 
         if let Some(msg) = &first_choice.message {
             if msg.content.trim().is_empty() {
-                // If we haven't already tried the single-message fallback, and we are not gemini (which already did it),
-                // we could try it here. But for now, let's just report the detailed error.
                 return Err(anyhow!(
                     "LLM returned empty content. Choice details: {:?}",
                     first_choice
@@ -181,7 +297,9 @@ impl LlmClient {
             Ok(content)
         } else if let Some(reason) = first_choice.finish_reason.as_ref() {
             if reason.to_lowercase().contains("content_filter") {
-                Err(anyhow!("Gemini content filter triggered: PROHIBITED_CONTENT. Try rephrasing your request."))
+                Err(anyhow!(
+                    "content filter triggered by current provider/model; trying fallback"
+                ))
             } else {
                 Err(anyhow!("LLM stopped execution. Reason: {}", reason))
             }
@@ -193,86 +311,263 @@ impl LlmClient {
         }
     }
 
-    fn build_cache_key(&self, messages: &[ChatMessage], temperature: f32) -> Result<String> {
+    fn build_cache_key(
+        &self,
+        target: &LlmTarget,
+        messages: &[ChatMessage],
+        temperature: f32,
+    ) -> Result<String> {
         let payload = serde_json::to_string(messages)
             .map_err(|e| anyhow!("Failed to serialize messages for cache key: {}", e))?;
         Ok(format!(
-            "{}|{}|{:.3}|{}",
-            self.base_url, self.model, temperature, payload
+            "{}|{}|{}|{:.3}|{}",
+            target.provider_name, target.base_url, target.model, temperature, payload
         ))
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        let is_gemini = self.base_url.contains("generativelanguage.googleapis.com");
-        let url = if is_gemini {
-            format!(
-                "{}/models?key={}",
-                self.base_url
-                    .trim_end_matches('/')
-                    .replace("/chat/completions", ""),
-                self.api_key
-            )
-        } else {
-            format!(
-                "{}/models",
-                self.base_url
-                    .trim_end_matches('/')
-                    .replace("/chat/completions", "")
-            )
-        };
+        let mut all = Vec::new();
+        let mut errors = Vec::new();
+        let mut visited = HashSet::new();
 
-        let mut request = self.http_client.get(&url);
-        if !is_gemini {
-            request = request.header("Authorization", format!("Bearer {}", self.api_key));
+        for target in &self.targets {
+            let key = format!(
+                "{}|{}|{:?}|{}",
+                target.provider_name,
+                target.base_url,
+                target.auth,
+                target.api_key.clone().unwrap_or_default()
+            );
+            if !visited.insert(key) {
+                continue;
+            }
+
+            match self.fetch_models_for_target(target).await {
+                Ok(models) => all.extend(models),
+                Err(e) => {
+                    errors.push(format!(
+                        "{} @ {}: {}",
+                        target.provider_name, target.base_url, e
+                    ));
+                }
+            }
         }
 
-        let response = request.send().await?;
-        let status = response.status();
-        let text = response.text().await?;
+        all.sort();
+        all.dedup();
 
-        if !status.is_success() {
+        if all.is_empty() {
             return Err(anyhow!(
-                "Failed to list models (Status {}): {}",
-                status,
-                text
+                "Failed to list models from configured providers:\n{}",
+                errors.join("\n")
             ));
         }
 
-        let list_data: ModelListData = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("Failed to parse model list: {} | Raw response: {}", e, text))?;
+        Ok(all)
+    }
 
-        let mut model_names = Vec::new();
+    async fn fetch_models_for_target(&self, target: &LlmTarget) -> Result<Vec<String>> {
+        // Gemini exposes model discovery on its non-openai endpoint.
+        if is_gemini_target(target) {
+            let key = target
+                .api_key
+                .clone()
+                .ok_or_else(|| anyhow!("Gemini model listing requires API key"))?;
+            let mut base = target.base_url.trim_end_matches('/').to_string();
+            if base.ends_with("/openai") {
+                base = base.trim_end_matches("/openai").to_string();
+            }
+            let url = format!("{}/models?key={}", base, key);
+            let response = self.http_client.get(&url).send().await?;
+            let status = response.status();
+            let text = response.text().await?;
+            if !status.is_success() {
+                return Err(anyhow!(
+                    "status {} from {}: {}",
+                    status,
+                    url,
+                    truncate_error(&text)
+                ));
+            }
+            return parse_model_list(&text);
+        }
 
-        // Handle Gemini style
-        if let Some(models) = list_data.models {
-            for m in models {
-                if let Some(name) = m.name {
-                    // Extract ID from name like "models/gemini-pro"
-                    let id = name.split('/').last().unwrap_or(&name).to_string();
-                    model_names.push(id);
-                }
+        // OpenAI-compatible path.
+        let url = format!("{}/models", target.base_url.trim_end_matches('/'));
+        let mut request = self.http_client.get(&url);
+        request = apply_auth_header(request, target)?;
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if status.is_success() {
+            return parse_model_list(&text);
+        }
+
+        // Ollama fallback to native endpoint.
+        if target.kind == ProviderKind::Ollama {
+            let base = target.base_url.trim_end_matches('/');
+            let root = base.strip_suffix("/v1").unwrap_or(base);
+            let fallback_url = format!("{}/api/models", root);
+            let response = self.http_client.get(&fallback_url).send().await?;
+            let fallback_status = response.status();
+            let fallback_text = response.text().await?;
+            if fallback_status.is_success() {
+                return parse_model_list(&fallback_text);
+            }
+            return Err(anyhow!(
+                "status {} from {}, then status {} from {}",
+                status,
+                url,
+                fallback_status,
+                fallback_url
+            ));
+        }
+
+        Err(anyhow!(
+            "status {} from {}: {}",
+            status,
+            url,
+            truncate_error(&text)
+        ))
+    }
+}
+
+fn parse_model_list(text: &str) -> Result<Vec<String>> {
+    let list_data: ModelListData = serde_json::from_str(text)
+        .map_err(|e| anyhow!("Failed to parse model list: {} | Raw response: {}", e, text))?;
+
+    let mut model_names = Vec::new();
+
+    if let Some(models) = list_data.models {
+        for m in models {
+            if let Some(name) = m.name {
+                let id = name.strip_prefix("models/").unwrap_or(&name).to_string();
+                model_names.push(id);
             }
         }
+    }
 
-        // Handle OpenAI/DeepSeek style
-        if let Some(data) = list_data.data {
-            for m in data {
-                if let Some(id) = m.id {
-                    model_names.push(id);
-                }
+    if let Some(data) = list_data.data {
+        for m in data {
+            if let Some(id) = m.id {
+                model_names.push(id);
             }
         }
+    }
 
-        if model_names.is_empty() {
-            return Err(anyhow!("No models found in provider response"));
+    if model_names.is_empty() {
+        return Err(anyhow!("No models found in provider response"));
+    }
+
+    model_names.sort();
+    model_names.dedup();
+    Ok(model_names)
+}
+
+fn build_messages(target: &LlmTarget, system_prompt: &str, user_input: &str) -> Vec<ChatMessage> {
+    if is_gemini_target(target) {
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: format!("{}\n\n### USER INPUT:\n{}", system_prompt, user_input),
+        }]
+    } else {
+        vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_input.to_string(),
+            },
+        ]
+    }
+}
+
+fn is_gemini_target(target: &LlmTarget) -> bool {
+    target.kind == ProviderKind::Gemini
+        || target
+            .base_url
+            .contains("generativelanguage.googleapis.com")
+}
+
+fn apply_auth_header(
+    request: reqwest::RequestBuilder,
+    target: &LlmTarget,
+) -> Result<reqwest::RequestBuilder> {
+    match target.auth {
+        ProviderAuth::None => Ok(request),
+        ProviderAuth::Bearer => {
+            let key = target
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing API key for provider {}", target.provider_name))?;
+            Ok(request.header("Authorization", format!("Bearer {}", key)))
         }
+        ProviderAuth::ApiKey => {
+            let key = target
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing API key for provider {}", target.provider_name))?;
+            Ok(request.header("Authorization", format!("Api-Key {}", key)))
+        }
+    }
+}
 
-        // Sort and deduplicate
-        model_names.sort();
-        model_names.dedup();
+fn infer_provider_kind(base_url: &str) -> ProviderKind {
+    let lower = base_url.to_lowercase();
+    if lower.contains("generativelanguage.googleapis.com") || lower.contains("googleapis.com") {
+        ProviderKind::Gemini
+    } else if lower.contains("deepseek.com") {
+        ProviderKind::DeepSeek
+    } else if lower.contains("groq.com") {
+        ProviderKind::Groq
+    } else if lower.contains("baseten.co") {
+        ProviderKind::Baseten
+    } else if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
+        ProviderKind::Ollama
+    } else {
+        ProviderKind::Custom
+    }
+}
 
-        // Filter for chat-compatible names if needed, but for now return all
-        Ok(model_names)
+fn target_from_provider(provider: &ProviderConfig, model: String) -> LlmTarget {
+    LlmTarget {
+        provider_name: provider.display_name(),
+        kind: provider.kind,
+        api_key: provider.api_key.clone(),
+        base_url: provider.base_url.trim().trim_end_matches('/').to_string(),
+        auth: provider.auth,
+        model,
+    }
+}
+
+fn target_key(target: &LlmTarget) -> String {
+    format!(
+        "{}|{}|{:?}|{}|{}",
+        target.provider_name,
+        target.base_url,
+        target.auth,
+        target.api_key.clone().unwrap_or_default(),
+        target.model
+    )
+}
+
+fn truncate_error(text: &str) -> String {
+    const MAX: usize = 320;
+    if text.len() > MAX {
+        format!("{}...", &text[..MAX])
+    } else {
+        text.to_string()
+    }
+}
+
+fn clean_optional(input: String) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 

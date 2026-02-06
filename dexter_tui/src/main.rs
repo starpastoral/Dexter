@@ -9,8 +9,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dexter_core::{
-    CachePolicy, ClarifyOption, Config, ContextScanner, Executor, LlmClient, RouteOutcome, Router,
-    SafetyGuard,
+    CachePolicy, ClarifyOption, Config, ContextScanner, Executor, LlmClient, ProviderAuth,
+    ProviderConfig, ProviderKind, RouteOutcome, Router, SafetyGuard,
 };
 use dexter_plugins::{F2Plugin, FFmpegPlugin, PandocPlugin, Plugin, PreviewContent, YtDlpPlugin};
 use ratatui::{
@@ -58,6 +58,7 @@ enum FooterAction {
     Submit,
     ClearInput,
     ToggleDebug,
+    Settings,
     Quit,
     Retry,
     Execute,
@@ -109,6 +110,7 @@ struct App {
     output_text_width: u16,
     output_scrollbar_rect: Option<Rect>,
     proposal_rect: Option<Rect>,
+    settings_button_rect: Option<Rect>,
 
     // Async execution handling
     routing_result_rx: Option<oneshot::Receiver<Result<RouteOutcome>>>,
@@ -118,6 +120,7 @@ struct App {
     execution_result_rx: Option<oneshot::Receiver<Result<String>>>,
     progress: Option<dexter_plugins::Progress>,
     generation_cache_policy: CachePolicy,
+    pending_open_settings: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -128,27 +131,17 @@ struct ClarifyPayload {
 
 impl App {
     fn new(config: Config) -> Self {
-        // Prioritize specific API key, fallback to others if we implemented that logic.
-        // For now, assuming Gemini as primary based on original code, but we should probably check others.
-        let api_key = config
-            .api_keys
-            .gemini
-            .clone()
-            .or(config.api_keys.deepseek.clone())
-            .unwrap_or_default();
-
-        let base_url = config.api_keys.base_url.clone().unwrap_or_else(|| {
-            "https://generativelanguage.googleapis.com/v1beta/openai/".to_string()
-        });
-
-        let router_client = LlmClient::new(
-            api_key.clone(),
-            base_url.clone(),
+        let providers = config.configured_providers();
+        let router_client = LlmClient::with_fallbacks(
+            providers.clone(),
             config.models.router_model.clone(),
+            config.models.router_fallback_models.clone(),
         );
-
-        let executor_client =
-            LlmClient::new(api_key, base_url, config.models.executor_model.clone());
+        let executor_client = LlmClient::with_fallbacks(
+            providers,
+            config.models.executor_model.clone(),
+            config.models.executor_fallback_models.clone(),
+        );
 
         let theme = Theme::from_config(&config.theme);
 
@@ -185,6 +178,7 @@ impl App {
             output_text_width: 0,
             output_scrollbar_rect: None,
             proposal_rect: None,
+            settings_button_rect: None,
             routing_result_rx: None,
             generation_result_rx: None,
             dry_run_result_rx: None,
@@ -192,7 +186,27 @@ impl App {
             execution_result_rx: None,
             progress: None,
             generation_cache_policy: CachePolicy::Normal,
+            pending_open_settings: false,
         }
+    }
+
+    fn apply_config(&mut self, config: Config) {
+        let providers = config.configured_providers();
+        let router_client = LlmClient::with_fallbacks(
+            providers.clone(),
+            config.models.router_model.clone(),
+            config.models.router_fallback_models.clone(),
+        );
+        let executor_client = LlmClient::with_fallbacks(
+            providers,
+            config.models.executor_model.clone(),
+            config.models.executor_fallback_models.clone(),
+        );
+
+        self.router = Router::new(router_client);
+        self.executor = Executor::new(executor_client);
+        self.theme = Theme::from_config(&config.theme);
+        self.config = config;
     }
 
     async fn update_context(&mut self) -> Result<()> {
@@ -345,13 +359,13 @@ async fn run_app(
                 app.state = AppState::Routing;
                 let _ = app.update_context().await;
                 let input = app.input.clone();
-                let context = app
-                    .current_context
-                    .clone()
-                    .unwrap_or(dexter_core::context::FileContext {
-                        files: Vec::new(),
-                        summary: None,
-                    });
+                let context =
+                    app.current_context
+                        .clone()
+                        .unwrap_or(dexter_core::context::FileContext {
+                            files: Vec::new(),
+                            summary: None,
+                        });
                 let plugins = app.plugins.clone();
                 let llm = app.router.llm_client().clone();
 
@@ -380,13 +394,13 @@ async fn run_app(
                     }
                 };
                 let input = app.input.clone();
-                let context = app
-                    .current_context
-                    .clone()
-                    .unwrap_or(dexter_core::context::FileContext {
-                        files: Vec::new(),
-                        summary: None,
-                    });
+                let context =
+                    app.current_context
+                        .clone()
+                        .unwrap_or(dexter_core::context::FileContext {
+                            files: Vec::new(),
+                            summary: None,
+                        });
                 let llm = app.executor.llm_client().clone();
                 let cache_policy = app.generation_cache_policy;
                 app.generation_cache_policy = CachePolicy::Normal;
@@ -438,9 +452,7 @@ async fn run_app(
                         return;
                     }
                     if !plugin.validate_command(&cmd) {
-                        let _ = tx.send(Err(anyhow!(
-                            "Command failed plugin validation logic"
-                        )));
+                        let _ = tx.send(Err(anyhow!("Command failed plugin validation logic")));
                         return;
                     }
                     let res = plugin.dry_run(&cmd, Some(&llm)).await;
@@ -465,12 +477,15 @@ async fn run_app(
                                         "This request isn’t supported.\n{}\nTry: convert formats or rename files (rename only, no conversion).",
                                         reason
                                     ));
-                                    app.logs.push("Routing result: unsupported request".to_string());
+                                    app.logs
+                                        .push("Routing result: unsupported request".to_string());
                                     app.state = AppState::Input;
                                     app.focus = FocusArea::Proposal;
                                     app.footer_focus = 0;
                                 }
-                                RouteOutcome::Clarify { question, options, .. } => {
+                                RouteOutcome::Clarify {
+                                    question, options, ..
+                                } => {
                                     app.clarify = Some(ClarifyPayload { question, options });
                                     app.notice = None;
                                     app.logs.push("Routing requires clarification".to_string());
@@ -563,6 +578,37 @@ async fn run_app(
             _ => {}
         }
 
+        if app.pending_open_settings {
+            app.pending_open_settings = false;
+            let busy = matches!(
+                app.state,
+                AppState::Routing
+                    | AppState::Generating
+                    | AppState::Executing
+                    | AppState::DryRunning
+                    | AppState::PendingRouting
+                    | AppState::PendingGeneration
+                    | AppState::PendingDryRun
+            );
+            if busy {
+                app.logs
+                    .push("Cannot open settings while a task is running.".to_string());
+            } else {
+                match run_settings_panel(terminal, app.config.clone()).await {
+                    Ok(new_config) => {
+                        app.apply_config(new_config);
+                        app.logs.push("Settings updated.".to_string());
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if !msg.to_lowercase().contains("aborted") {
+                            app.logs.push(format!("Settings update failed: {}", msg));
+                        }
+                    }
+                }
+            }
+        }
+
         // Keep output scrolling bounds in sync with current terminal size/content.
         update_output_scroll_bounds(terminal, app)?;
 
@@ -626,7 +672,8 @@ async fn run_app(
                             continue;
                         }
                         KeyCode::Left => {
-                            if app.focus == FocusArea::FooterButtons && !app.footer_buttons.is_empty()
+                            if app.focus == FocusArea::FooterButtons
+                                && !app.footer_buttons.is_empty()
                             {
                                 if app.footer_focus == 0 {
                                     app.footer_focus = app.footer_buttons.len() - 1;
@@ -637,9 +684,11 @@ async fn run_app(
                             }
                         }
                         KeyCode::Right => {
-                            if app.focus == FocusArea::FooterButtons && !app.footer_buttons.is_empty()
+                            if app.focus == FocusArea::FooterButtons
+                                && !app.footer_buttons.is_empty()
                             {
-                                app.footer_focus = (app.footer_focus + 1) % app.footer_buttons.len();
+                                app.footer_focus =
+                                    (app.footer_focus + 1) % app.footer_buttons.len();
                                 continue;
                             }
                         }
@@ -698,7 +747,11 @@ async fn run_app(
                             }
                             KeyCode::Enter => {
                                 if app.focus == FocusArea::Proposal {
-                                    insert_char_at_cursor(&mut app.input, &mut app.input_cursor, '\n');
+                                    insert_char_at_cursor(
+                                        &mut app.input,
+                                        &mut app.input_cursor,
+                                        '\n',
+                                    );
                                 }
                             }
                             KeyCode::Left => {
@@ -742,7 +795,10 @@ async fn run_app(
                             }
                             KeyCode::Backspace => {
                                 if app.focus == FocusArea::Proposal {
-                                    delete_char_before_cursor(&mut app.input, &mut app.input_cursor);
+                                    delete_char_before_cursor(
+                                        &mut app.input,
+                                        &mut app.input_cursor,
+                                    );
                                     app.notice = None;
                                     app.clarify = None;
                                 }
@@ -797,11 +853,9 @@ async fn run_app(
                             KeyCode::Char('d')
                                 if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                             {
-                                let should_quit = perform_footer_action(
-                                    app,
-                                    FooterAction::PreviewEditedCommand,
-                                )
-                                .await?;
+                                let should_quit =
+                                    perform_footer_action(app, FooterAction::PreviewEditedCommand)
+                                        .await?;
                                 if should_quit {
                                     return Ok(());
                                 }
@@ -809,11 +863,9 @@ async fn run_app(
                             KeyCode::Enter
                                 if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                             {
-                                let should_quit = perform_footer_action(
-                                    app,
-                                    FooterAction::PreviewEditedCommand,
-                                )
-                                .await?;
+                                let should_quit =
+                                    perform_footer_action(app, FooterAction::PreviewEditedCommand)
+                                        .await?;
                                 if should_quit {
                                     return Ok(());
                                 }
@@ -850,12 +902,18 @@ async fn run_app(
                             }
                             KeyCode::Home => {
                                 if app.focus == FocusArea::Proposal {
-                                    move_cursor_line_start(&app.command_draft, &mut app.command_cursor);
+                                    move_cursor_line_start(
+                                        &app.command_draft,
+                                        &mut app.command_cursor,
+                                    );
                                 }
                             }
                             KeyCode::End => {
                                 if app.focus == FocusArea::Proposal {
-                                    move_cursor_line_end(&app.command_draft, &mut app.command_cursor);
+                                    move_cursor_line_end(
+                                        &app.command_draft,
+                                        &mut app.command_cursor,
+                                    );
                                 }
                             }
                             KeyCode::Char(c) => {
@@ -884,11 +942,9 @@ async fn run_app(
                                 }
                             }
                             KeyCode::Esc => {
-                                let should_quit = perform_footer_action(
-                                    app,
-                                    FooterAction::CancelEditCommand,
-                                )
-                                .await?;
+                                let should_quit =
+                                    perform_footer_action(app, FooterAction::CancelEditCommand)
+                                        .await?;
                                 if should_quit {
                                     return Ok(());
                                 }
@@ -973,8 +1029,8 @@ async fn run_app(
                                 let track_h = sb.height.max(1);
                                 let rel = mouse.row.saturating_sub(sb.y).min(track_h - 1);
                                 let denom = track_h.saturating_sub(1).max(1) as u32;
-                                let new_scroll = ((rel as u32) * (app.output_max_scroll as u32)
-                                    / denom) as u16;
+                                let new_scroll =
+                                    ((rel as u32) * (app.output_max_scroll as u32) / denom) as u16;
                                 app.output_scroll = new_scroll.min(app.output_max_scroll);
                                 continue;
                             }
@@ -982,6 +1038,17 @@ async fn run_app(
 
                         // Otherwise, treat it as a click on the button bar (if any) or focus change.
                         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                            if let Some(rect) = app.settings_button_rect {
+                                if point_in_rect(rect, mouse.column, mouse.row) {
+                                    let should_quit =
+                                        perform_footer_action(app, FooterAction::Settings).await?;
+                                    if should_quit {
+                                        return Ok(());
+                                    }
+                                    continue;
+                                }
+                            }
+
                             // Click footer buttons if mouse is within the rect.
                             let mut clicked_button = false;
                             for (idx, btn) in app.footer_buttons.iter().enumerate() {
@@ -1046,6 +1113,9 @@ async fn run_app(
 async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bool> {
     match action {
         FooterAction::Quit => return Ok(true),
+        FooterAction::Settings => {
+            app.pending_open_settings = true;
+        }
         FooterAction::ToggleDebug => {
             app.show_debug = !app.show_debug;
             app.logs.push(format!(
@@ -1293,57 +1363,48 @@ fn ui(f: &mut Frame, app: &mut App) {
         | AppState::Generating
         | AppState::PendingRouting
         | AppState::PendingGeneration
-        | AppState::Clarifying => (
-            " USER INTENT ",
-            {
-                let mut lines = vec![Line::from("")];
-                lines.extend(render_multiline_prompt(
-                    &app.input,
-                    Span::styled(" > ", app.theme.header_subtitle_style),
-                    Span::styled("   ", app.theme.header_subtitle_style),
-                    app.theme.header_subtitle_style,
-                    None,
-                    false,
-                    None,
-                ));
-                lines
-            },
-        ),
+        | AppState::Clarifying => (" USER INTENT ", {
+            let mut lines = vec![Line::from("")];
+            lines.extend(render_multiline_prompt(
+                &app.input,
+                Span::styled(" > ", app.theme.header_subtitle_style),
+                Span::styled("   ", app.theme.header_subtitle_style),
+                app.theme.header_subtitle_style,
+                None,
+                false,
+                None,
+            ));
+            lines
+        }),
         _ => {
             if let Some(cmd) = &app.generated_command {
-                (
-                    " PROPOSAL ",
-                    {
-                        let mut lines = vec![Line::from("")];
-                        lines.extend(render_multiline_prompt(
-                            cmd,
-                            Span::styled(" > ", app.theme.header_subtitle_style),
-                            Span::styled("   ", app.theme.header_subtitle_style),
-                            app.theme.proposal_cmd_style,
-                            None,
-                            false,
-                            None,
-                        ));
-                        lines
-                    },
-                )
+                (" PROPOSAL ", {
+                    let mut lines = vec![Line::from("")];
+                    lines.extend(render_multiline_prompt(
+                        cmd,
+                        Span::styled(" > ", app.theme.header_subtitle_style),
+                        Span::styled("   ", app.theme.header_subtitle_style),
+                        app.theme.proposal_cmd_style,
+                        None,
+                        false,
+                        None,
+                    ));
+                    lines
+                })
             } else {
-                (
-                    " USER INTENT (FAILED) ",
-                    {
-                        let mut lines = vec![Line::from("")];
-                        lines.extend(render_multiline_prompt(
-                            &app.input,
-                            Span::styled(" > ", app.theme.error_style),
-                            Span::styled("   ", app.theme.error_style),
-                            app.theme.error_style,
-                            None,
-                            false,
-                            None,
-                        ));
-                        lines
-                    },
-                )
+                (" USER INTENT (FAILED) ", {
+                    let mut lines = vec![Line::from("")];
+                    lines.extend(render_multiline_prompt(
+                        &app.input,
+                        Span::styled(" > ", app.theme.error_style),
+                        Span::styled("   ", app.theme.error_style),
+                        app.theme.error_style,
+                        None,
+                        false,
+                        None,
+                    ));
+                    lines
+                })
             }
         }
     };
@@ -1419,21 +1480,48 @@ fn ui(f: &mut Frame, app: &mut App) {
         .border_style(border_style);
     f.render_widget(&footer_block, main_layout[4]);
     let footer_inner = footer_block.inner(main_layout[4]);
+    app.settings_button_rect = None;
+    let settings_label = " [SETTINGS] ";
+    let settings_width = settings_label.len() as u16;
 
-    let line1 = Line::from(vec![
-        Span::styled(" MODE: ", app.theme.footer_text_style),
-        Span::styled(&state_name, app.theme.footer_highlight_style),
-        Span::styled("  MODEL: ", app.theme.footer_text_style),
-        Span::styled(
-            &app.config.models.executor_model,
-            app.theme.footer_highlight_style,
-        ),
-        Span::styled("  PROVIDER: ", app.theme.footer_text_style),
-        Span::styled(&provider_name, app.theme.footer_highlight_style),
-    ]);
+    if footer_inner.width > settings_width {
+        let footer_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(settings_width)])
+            .split(footer_inner);
 
-    let info = Paragraph::new(vec![line1]).style(block_style);
-    f.render_widget(info, footer_inner);
+        let line1 = Line::from(vec![
+            Span::styled(" MODE: ", app.theme.footer_text_style),
+            Span::styled(&state_name, app.theme.footer_highlight_style),
+            Span::styled("  MODEL: ", app.theme.footer_text_style),
+            Span::styled(
+                &app.config.models.executor_model,
+                app.theme.footer_highlight_style,
+            ),
+            Span::styled("  PROVIDER: ", app.theme.footer_text_style),
+            Span::styled(&provider_name, app.theme.footer_highlight_style),
+        ]);
+        let info = Paragraph::new(vec![line1]).style(block_style);
+        f.render_widget(info, footer_layout[0]);
+
+        let settings_button = Paragraph::new(settings_label).style(app.theme.footer_key_style);
+        f.render_widget(settings_button, footer_layout[1]);
+        app.settings_button_rect = Some(footer_layout[1]);
+    } else {
+        let line1 = Line::from(vec![
+            Span::styled(" MODE: ", app.theme.footer_text_style),
+            Span::styled(&state_name, app.theme.footer_highlight_style),
+            Span::styled("  MODEL: ", app.theme.footer_text_style),
+            Span::styled(
+                &app.config.models.executor_model,
+                app.theme.footer_highlight_style,
+            ),
+            Span::styled("  PROVIDER: ", app.theme.footer_text_style),
+            Span::styled(&provider_name, app.theme.footer_highlight_style),
+        ]);
+        let info = Paragraph::new(vec![line1]).style(block_style);
+        f.render_widget(info, footer_inner);
+    }
 }
 
 fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1490,20 +1578,13 @@ fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn get_provider_name(config: &Config) -> String {
-    if let Some(ref url) = config.api_keys.base_url {
-        if url.contains("googleapis.com") {
-            "Gemini".to_string()
-        } else if url.contains("deepseek.com") {
-            "DeepSeek".to_string()
-        } else {
-            "Custom Endpoint".to_string()
-        }
-    } else if config.api_keys.gemini.is_some() {
-        "Gemini".to_string()
-    } else if config.api_keys.deepseek.is_some() {
-        "DeepSeek".to_string()
-    } else {
+    let providers = config.configured_providers();
+    if providers.is_empty() {
         "Unknown".to_string()
+    } else if providers.len() == 1 {
+        providers[0].display_name()
+    } else {
+        format!("{} +{}", providers[0].display_name(), providers.len() - 1)
     }
 }
 
@@ -1618,10 +1699,7 @@ fn render_multiline_prompt<'a>(
             out.push(Line::from(spans));
             cursor_pending = false;
         } else {
-            out.push(Line::from(vec![
-                prefix,
-                Span::styled(*line, text_style),
-            ]));
+            out.push(Line::from(vec![prefix, Span::styled(*line, text_style)]));
             if cursor_pending {
                 remaining = remaining.saturating_sub(line_len + 1);
             }
@@ -2328,7 +2406,7 @@ fn update_output_scroll_bounds(
 
     let output_viewport_height = main_layout[3].height.saturating_sub(2); // subtract borders
     let output_inner_width = main_layout[3].width.saturating_sub(2); // subtract borders
-    // Leave 1 column slack so the animation doesn't wrap when the scrollbar appears.
+                                                                     // Leave 1 column slack so the animation doesn't wrap when the scrollbar appears.
     app.output_text_width = output_inner_width.saturating_sub(1);
     let (_, lines) = build_output_view(app);
     let line_count = lines.len() as u16;
@@ -2344,8 +2422,8 @@ fn update_output_scroll_bounds(
 #[derive(Debug, Clone, PartialEq)]
 enum SetupState {
     Welcome,
-    GeminiKey,
-    DeepSeekKey,
+    ProviderSelection,
+    ProviderConfig,
     FetchingModels,
     ModelSelection,
     ThemeSelection,
@@ -2354,11 +2432,61 @@ enum SetupState {
     Error(String),
 }
 
+#[derive(Debug, Clone)]
+struct SetupProviderEntry {
+    kind: ProviderKind,
+    selected: bool,
+    api_key: String,
+    base_url: String,
+    auth: ProviderAuth,
+    models: Vec<String>,
+}
+
+impl SetupProviderEntry {
+    fn name(&self) -> &'static str {
+        self.kind.display_name()
+    }
+
+    fn requires_api_key(&self) -> bool {
+        !matches!(self.auth, ProviderAuth::None)
+    }
+
+    fn to_provider_config(&self) -> ProviderConfig {
+        let api_key = if self.api_key.trim().is_empty() {
+            None
+        } else {
+            Some(self.api_key.trim().to_string())
+        };
+        ProviderConfig {
+            kind: self.kind,
+            name: Some(self.name().to_string()),
+            api_key,
+            base_url: self.base_url.clone(),
+            auth: self.auth,
+            enabled: self.selected,
+            models: if self.models.is_empty() {
+                self.kind.default_models()
+            } else {
+                self.models.clone()
+            },
+        }
+        .normalized()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModelChoice {
+    provider_idx: usize,
+    model: String,
+    display: String,
+}
+
 struct SetupApp {
     state: SetupState,
-    gemini_key: String,
-    deepseek_key: String,
-    available_models: Vec<String>,
+    providers: Vec<SetupProviderEntry>,
+    selected_provider_idx: usize,
+    provider_config_step: usize,
+    available_models: Vec<ModelChoice>,
     selected_model_idx: usize,
     available_themes: Vec<(&'static str, &'static str)>,
     selected_theme_idx: usize,
@@ -2367,11 +2495,26 @@ struct SetupApp {
 }
 
 impl SetupApp {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, show_welcome: bool) -> Self {
+        let mut providers = build_provider_entries(&config);
+        if !providers.iter().any(|p| p.selected) {
+            if let Some(gemini) = providers
+                .iter_mut()
+                .find(|p| matches!(p.kind, ProviderKind::Gemini))
+            {
+                gemini.selected = true;
+            }
+        }
+
         Self {
-            state: SetupState::Welcome,
-            gemini_key: String::new(),
-            deepseek_key: String::new(),
+            state: if show_welcome {
+                SetupState::Welcome
+            } else {
+                SetupState::ProviderSelection
+            },
+            providers,
+            selected_provider_idx: 0,
+            provider_config_step: 0,
             available_models: Vec::new(),
             selected_model_idx: 0,
             available_themes: vec![
@@ -2386,61 +2529,74 @@ impl SetupApp {
         }
     }
 
+    fn selected_provider_indices(&self) -> Vec<usize> {
+        self.providers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, p)| if p.selected { Some(idx) } else { None })
+            .collect()
+    }
+
     async fn fetch_available_models(&mut self) -> Result<()> {
         let mut all_models = Vec::new();
         let mut errors = Vec::new();
+        let selected = self.selected_provider_indices();
 
-        // Fetch from Gemini if key provided
-        if !self.gemini_key.trim().is_empty() {
-            let client = dexter_core::LlmClient::new(
-                self.gemini_key.clone(),
-                "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                "gemini-flash".to_string(),
+        for idx in selected {
+            let provider_cfg = self.providers[idx].to_provider_config();
+            let primary = provider_cfg
+                .models
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "gemini-2.5-flash-lite".to_string());
+            let client = dexter_core::LlmClient::with_fallbacks(
+                vec![provider_cfg.clone()],
+                primary,
+                Vec::new(),
             );
             match client.list_models().await {
                 Ok(models) => {
+                    self.providers[idx].models = models.clone();
                     for m in models {
-                        all_models.push(format!("{} (Google)", m));
+                        all_models.push(ModelChoice {
+                            provider_idx: idx,
+                            display: format!("{} ({})", m, self.providers[idx].name()),
+                            model: m,
+                        });
                     }
                 }
                 Err(e) => {
-                    errors.push(format!("Gemini Error: {}", e));
-                }
-            }
-        }
-
-        // Fetch from DeepSeek if key provided
-        if !self.deepseek_key.trim().is_empty() {
-            let client = dexter_core::LlmClient::new(
-                self.deepseek_key.clone(),
-                "https://api.deepseek.com/v1".to_string(),
-                "deepseek-chat".to_string(),
-            );
-            match client.list_models().await {
-                Ok(models) => {
-                    for m in models {
-                        all_models.push(format!("{} (DeepSeek)", m));
-                    }
-                }
-                Err(e) => {
-                    errors.push(format!("DeepSeek Error: {}", e));
+                    errors.push(format!("{} Error: {}", self.providers[idx].name(), e));
                 }
             }
         }
 
         if all_models.is_empty() {
-            if !errors.is_empty() {
-                // If we have errors and no models, fail loudly so user can see why
-                return Err(anyhow::anyhow!(
-                    "Model Discovery Failed:\n{}",
-                    errors.join("\n")
-                ));
+            for idx in self.selected_provider_indices() {
+                for m in self.providers[idx].kind.default_models() {
+                    all_models.push(ModelChoice {
+                        provider_idx: idx,
+                        display: format!("{} ({})", m, self.providers[idx].name()),
+                        model: m,
+                    });
+                }
             }
-
-            // Only fallback if no keys provided or no errors (just empty lists?)
-            all_models.push("gemini-2.5-flash (Fallback)".to_string());
-            all_models.push("gemini-2.5-pro (Fallback)".to_string());
         }
+
+        if all_models.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Model Discovery Failed:\n{}",
+                if errors.is_empty() {
+                    "No provider models available.".to_string()
+                } else {
+                    errors.join("\n")
+                }
+            ));
+        }
+
+        // Deduplicate by provider + model, preserve order.
+        let mut seen = std::collections::HashSet::new();
+        all_models.retain(|item| seen.insert((item.provider_idx, item.model.clone())));
 
         self.available_models = all_models;
         self.selected_model_idx = 0;
@@ -2448,23 +2604,44 @@ impl SetupApp {
     }
 
     async fn save_config(&mut self) -> Result<()> {
-        if !self.gemini_key.is_empty() {
-            self.config.api_keys.gemini = Some(self.gemini_key.clone());
-        }
-        if !self.deepseek_key.is_empty() {
-            self.config.api_keys.deepseek = Some(self.deepseek_key.clone());
-        }
+        let selected_indices = self.selected_provider_indices();
+        let providers: Vec<ProviderConfig> = selected_indices
+            .iter()
+            .map(|idx| self.providers[*idx].to_provider_config())
+            .collect();
+        self.config.providers = providers.clone();
+
+        // Keep legacy fields for backward compatibility.
+        self.config.api_keys.gemini = providers
+            .iter()
+            .find(|p| matches!(p.kind, ProviderKind::Gemini))
+            .and_then(|p| p.api_key.clone());
+        self.config.api_keys.deepseek = providers
+            .iter()
+            .find(|p| matches!(p.kind, ProviderKind::DeepSeek))
+            .and_then(|p| p.api_key.clone());
+        self.config.api_keys.base_url = None;
 
         // Parse selected model
-        let selection = &self.available_models[self.selected_model_idx];
-        let model_id = selection
-            .split_whitespace()
-            .next()
-            .unwrap_or("gemini-2.5-flash-lite")
-            .to_string();
+        let model_id = self
+            .available_models
+            .get(self.selected_model_idx)
+            .map(|m| m.model.clone())
+            .unwrap_or_else(|| "gemini-2.5-flash-lite".to_string());
 
         self.config.models.router_model = model_id.clone();
-        self.config.models.executor_model = model_id;
+        self.config.models.executor_model = model_id.clone();
+        let mut fallback_models = Vec::new();
+        for m in &self.available_models {
+            if m.model == model_id {
+                continue;
+            }
+            if !fallback_models.iter().any(|x| x == &m.model) {
+                fallback_models.push(m.model.clone());
+            }
+        }
+        self.config.models.router_fallback_models = fallback_models.clone();
+        self.config.models.executor_fallback_models = fallback_models;
 
         // Save selected theme
         let theme_id = self.available_themes[self.selected_theme_idx].0;
@@ -2479,7 +2656,22 @@ async fn run_setup_wizard(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<Stdout>>,
     config: Config,
 ) -> Result<Config> {
-    let mut app = SetupApp::new(config);
+    run_setup_flow(terminal, config, true).await
+}
+
+async fn run_settings_panel(
+    terminal: &mut Terminal<ratatui::backend::CrosstermBackend<Stdout>>,
+    config: Config,
+) -> Result<Config> {
+    run_setup_flow(terminal, config, false).await
+}
+
+async fn run_setup_flow(
+    terminal: &mut Terminal<ratatui::backend::CrosstermBackend<Stdout>>,
+    config: Config,
+    show_welcome: bool,
+) -> Result<Config> {
+    let mut app = SetupApp::new(config, show_welcome);
 
     loop {
         terminal.draw(|f| setup_ui(f, &app))?;
@@ -2498,30 +2690,85 @@ async fn run_setup_wizard(
                 if key.kind == KeyEventKind::Press {
                     match app.state {
                         SetupState::Welcome => match key.code {
-                            KeyCode::Enter => app.state = SetupState::GeminiKey,
+                            KeyCode::Enter => app.state = SetupState::ProviderSelection,
                             KeyCode::Esc => return Err(anyhow!("Setup aborted by user")),
                             _ => {}
                         },
-                        SetupState::GeminiKey => match key.code {
-                            KeyCode::Enter => app.state = SetupState::DeepSeekKey,
-                            KeyCode::Char(c) => app.gemini_key.push(c),
-                            KeyCode::Backspace => {
-                                app.gemini_key.pop();
+                        SetupState::ProviderSelection => match key.code {
+                            KeyCode::Up | KeyCode::Left => {
+                                if app.selected_provider_idx > 0 {
+                                    app.selected_provider_idx -= 1;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Right => {
+                                if app.selected_provider_idx < app.providers.len().saturating_sub(1)
+                                {
+                                    app.selected_provider_idx += 1;
+                                }
+                            }
+                            KeyCode::Char(' ') => {
+                                if let Some(provider) =
+                                    app.providers.get_mut(app.selected_provider_idx)
+                                {
+                                    provider.selected = !provider.selected;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if app.selected_provider_indices().is_empty() {
+                                    app.state = SetupState::Error(
+                                        "Please select at least one provider.".to_string(),
+                                    );
+                                } else {
+                                    app.provider_config_step = 0;
+                                    app.state = SetupState::ProviderConfig;
+                                }
                             }
                             KeyCode::Esc => return Err(anyhow!("Setup aborted")),
                             _ => {}
                         },
-                        SetupState::DeepSeekKey => match key.code {
-                            KeyCode::Enter => {
+                        SetupState::ProviderConfig => {
+                            let selected = app.selected_provider_indices();
+                            let Some(current_idx) = selected.get(app.provider_config_step).copied()
+                            else {
                                 app.state = SetupState::FetchingModels;
+                                continue;
+                            };
+                            let requires_key = app.providers[current_idx].requires_api_key();
+                            match key.code {
+                                KeyCode::Enter => {
+                                    if requires_key
+                                        && app.providers[current_idx].api_key.trim().is_empty()
+                                    {
+                                        app.state = SetupState::Error(format!(
+                                            "{} requires an API key.",
+                                            app.providers[current_idx].name()
+                                        ));
+                                    } else if app.provider_config_step + 1 < selected.len() {
+                                        app.provider_config_step += 1;
+                                    } else {
+                                        app.state = SetupState::FetchingModels;
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    if requires_key {
+                                        app.providers[current_idx].api_key.push(c);
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if requires_key {
+                                        app.providers[current_idx].api_key.pop();
+                                    }
+                                }
+                                KeyCode::Esc => {
+                                    if app.provider_config_step > 0 {
+                                        app.provider_config_step -= 1;
+                                    } else {
+                                        app.state = SetupState::ProviderSelection;
+                                    }
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(c) => app.deepseek_key.push(c),
-                            KeyCode::Backspace => {
-                                app.deepseek_key.pop();
-                            }
-                            KeyCode::Esc => app.state = SetupState::GeminiKey,
-                            _ => {}
-                        },
+                        }
                         SetupState::FetchingModels => {} // No input while fetching
                         SetupState::ModelSelection => match key.code {
                             KeyCode::Up | KeyCode::Left => {
@@ -2537,7 +2784,7 @@ async fn run_setup_wizard(
                                 }
                             }
                             KeyCode::Enter => app.state = SetupState::ThemeSelection,
-                            KeyCode::Esc => app.state = SetupState::DeepSeekKey,
+                            KeyCode::Esc => app.state = SetupState::ProviderConfig,
                             _ => {}
                         },
                         SetupState::ThemeSelection => match key.code {
@@ -2578,8 +2825,7 @@ async fn run_setup_wizard(
                         }
                         SetupState::Error(_) => {
                             if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
-                                // Allow user to go back to key entry instead of crashing
-                                app.state = SetupState::GeminiKey;
+                                app.state = SetupState::ProviderSelection;
                             }
                         }
                         _ => {}
@@ -2625,63 +2871,101 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
                 "Dexter Requires Access to Advanced Neural Networks to Function.",
                 app.theme.header_subtitle_style,
             )),
-            Line::from("We Will Guide You Through Setting Up Your API Keys."),
+            Line::from("We Will Guide You Through Multi-Provider Setup and Model Selection."),
             Line::from(""),
             Line::from(Span::styled(
                 "[PRESS ENTER TO BEGIN]",
                 app.theme.input_cursor_style,
             )),
         ],
-        SetupState::GeminiKey => vec![
-            Line::from(Span::styled(
-                "STEP 1: GEMINI API KEY",
-                app.theme.header_title_style,
-            )),
-            Line::from(""),
-            Line::from("Enter Your Google Gemini API Key:"),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("> ", app.theme.input_prompt_style),
-                Span::styled(
-                    if app.gemini_key.is_empty() {
-                        "_"
-                    } else {
-                        &app.gemini_key
-                    },
-                    app.theme.input_text_style,
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "(Press Enter to Leave Empty If You Only Have DeepSeek)",
+        SetupState::ProviderSelection => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "STEP 1: SELECT PROVIDERS",
+                    app.theme.header_title_style,
+                )),
+                Line::from(""),
+                Line::from("Choose one or more providers for routing + fallback:"),
+                Line::from(""),
+            ];
+
+            for (idx, provider) in app.providers.iter().enumerate() {
+                let is_cursor = idx == app.selected_provider_idx;
+                let style = if is_cursor {
+                    app.theme.proposal_cmd_style
+                } else {
+                    app.theme.header_subtitle_style
+                };
+                let marker = if provider.selected { "[x]" } else { "[ ]" };
+                let prefix = if is_cursor { "> " } else { "  " };
+                lines.push(Line::from(Span::styled(
+                    format!("{}{} {}", prefix, marker, provider.name()),
+                    style,
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "(↑↓ Move, SPACE Toggle, ENTER Continue)",
                 app.theme.header_subtitle_style,
-            )),
-        ],
-        SetupState::DeepSeekKey => vec![
-            Line::from(Span::styled(
-                "STEP 2: DEEPSEEK API KEY",
-                app.theme.header_title_style,
-            )),
-            Line::from(""),
-            Line::from("Enter Your DeepSeek API Key:"),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("> ", app.theme.input_prompt_style),
-                Span::styled(
-                    if app.deepseek_key.is_empty() {
-                        "_"
-                    } else {
-                        &app.deepseek_key
-                    },
-                    app.theme.input_text_style,
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "(Press Enter to Leave Empty to Skip If You Only Have Gemini)",
-                app.theme.header_subtitle_style,
-            )),
-        ],
+            )));
+            lines
+        }
+        SetupState::ProviderConfig => {
+            let selected = app.selected_provider_indices();
+            let current_idx = selected.get(app.provider_config_step).copied();
+            if let Some(provider_idx) = current_idx {
+                let provider = &app.providers[provider_idx];
+                let total = selected.len();
+                let step = app.provider_config_step + 1;
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        format!("STEP 2: CONFIGURE PROVIDER ({}/{})", step, total),
+                        app.theme.header_title_style,
+                    )),
+                    Line::from(""),
+                    Line::from(format!("Provider: {}", provider.name())),
+                    Line::from(format!("Base URL: {}", provider.base_url)),
+                    Line::from(""),
+                ];
+
+                if provider.requires_api_key() {
+                    lines.push(Line::from("Enter API Key:"));
+                    lines.push(Line::from(vec![
+                        Span::styled("> ", app.theme.input_prompt_style),
+                        Span::styled(
+                            if provider.api_key.is_empty() {
+                                "_"
+                            } else {
+                                &provider.api_key
+                            },
+                            app.theme.input_text_style,
+                        ),
+                    ]));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "(ENTER Next, ESC Previous Provider)",
+                        app.theme.header_subtitle_style,
+                    )));
+                } else {
+                    lines.push(Line::from("No API key required for this provider."));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "(ENTER Next, ESC Previous Provider)",
+                        app.theme.header_subtitle_style,
+                    )));
+                }
+                lines
+            } else {
+                vec![
+                    Line::from(Span::styled(
+                        "STEP 2: CONFIGURE PROVIDER",
+                        app.theme.header_title_style,
+                    )),
+                    Line::from("No selected provider found."),
+                ]
+            }
+        }
         SetupState::FetchingModels => vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -2701,7 +2985,9 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
                     app.theme.header_title_style,
                 )),
                 Line::from(""),
-                Line::from("Select the AI Model to Power Dexter:"),
+                Line::from(
+                    "Select primary model (providers and models will be used for fallback):",
+                ),
                 Line::from(""),
             ];
 
@@ -2717,7 +3003,7 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
                     "  "
                 };
                 lines.push(Line::from(Span::styled(
-                    format!("{}{}", prefix, model),
+                    format!("{}{}", prefix, model.display),
                     style,
                 )));
             }
@@ -2771,26 +3057,24 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
             )),
             Line::from(""),
             Line::from(format!(
-                "Gemini Key: {}",
-                if app.gemini_key.is_empty() {
-                    "NOT SET"
-                } else {
-                    "SET"
-                }
-            )),
-            Line::from(format!(
-                "DeepSeek Key: {}",
-                if app.deepseek_key.is_empty() {
-                    "NOT SET"
-                } else {
-                    "SET"
-                }
+                "Providers: {}",
+                app.providers
+                    .iter()
+                    .filter(|p| p.selected)
+                    .map(|p| p.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
             Line::from(format!(
                 "Selected Model: {}",
                 app.available_models
                     .get(app.selected_model_idx)
-                    .unwrap_or(&"Unknown".to_string())
+                    .map(|m| m.display.as_str())
+                    .unwrap_or("Unknown")
+            )),
+            Line::from(format!(
+                "Fallback Models: {}",
+                app.available_models.len().saturating_sub(1)
             )),
             Line::from(format!(
                 "Theme: {}",
@@ -2825,4 +3109,39 @@ fn setup_ui(f: &mut Frame, app: &SetupApp) {
         .style(app.theme.base_style)
         .wrap(Wrap { trim: true });
     f.render_widget(content, chunks[1]);
+}
+
+fn build_provider_entries(config: &Config) -> Vec<SetupProviderEntry> {
+    let existing = config.effective_providers();
+    let supported = [
+        ProviderKind::Gemini,
+        ProviderKind::DeepSeek,
+        ProviderKind::Groq,
+        ProviderKind::Baseten,
+        ProviderKind::Ollama,
+    ];
+
+    supported
+        .iter()
+        .map(|kind| {
+            let mut base = ProviderConfig::builtin(*kind, None).normalized();
+            let mut selected = false;
+            if let Some(existing_provider) = existing.iter().find(|p| p.kind == *kind) {
+                base.api_key = existing_provider.api_key.clone();
+                base.base_url = existing_provider.base_url.clone();
+                base.auth = existing_provider.auth;
+                base.models = existing_provider.models.clone();
+                selected = existing_provider.enabled;
+            }
+
+            SetupProviderEntry {
+                kind: *kind,
+                selected,
+                api_key: base.api_key.unwrap_or_default(),
+                base_url: base.base_url,
+                auth: base.auth,
+                models: base.models,
+            }
+        })
+        .collect()
 }

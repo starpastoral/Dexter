@@ -1,7 +1,7 @@
 use crate::context::FileContext;
 use crate::llm::LlmClient;
-use crate::CachePolicy;
 use crate::safety::SafetyGuard;
+use crate::CachePolicy;
 use anyhow::{Context, Result};
 use dexter_plugins::Plugin;
 use serde_json::json;

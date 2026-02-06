@@ -1,14 +1,14 @@
-pub use config::Config;
-pub use llm::{CachePolicy, LlmClient};
+pub use config::{Config, ProviderAuth, ProviderConfig, ProviderKind};
 pub use context::{ContextScanner, FileContext};
+pub use executor::Executor;
+pub use llm::{CachePolicy, LlmClient};
 pub use router::Router;
 pub use router::{ClarifyOption, ClarifySource, RouteOutcome};
 pub use safety::SafetyGuard;
-pub use executor::Executor;
 
 pub mod config;
-pub mod llm;
 pub mod context;
+pub mod executor;
+pub mod llm;
 pub mod router;
 pub mod safety;
-pub mod executor;
