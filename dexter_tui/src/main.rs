@@ -9,7 +9,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dexter_core::{
-    ClarifyOption, Config, ContextScanner, Executor, LlmClient, RouteOutcome, Router, SafetyGuard,
+    CachePolicy, ClarifyOption, Config, ContextScanner, Executor, LlmClient, RouteOutcome, Router,
+    SafetyGuard,
 };
 use dexter_plugins::{F2Plugin, FFmpegPlugin, PandocPlugin, Plugin, PreviewContent, YtDlpPlugin};
 use ratatui::{
@@ -79,12 +80,14 @@ struct FooterButton {
 struct App {
     state: AppState,
     input: String,
+    input_cursor: usize,
     router: Router,
     executor: Executor,
     plugins: Vec<Arc<dyn Plugin>>,
     selected_plugin: Option<String>,
     generated_command: Option<String>,
     command_draft: String,
+    command_cursor: usize,
     logs: Vec<String>,
     tick_count: u64,
     current_context: Option<dexter_core::context::FileContext>,
@@ -105,6 +108,7 @@ struct App {
     output_max_scroll: u16,
     output_text_width: u16,
     output_scrollbar_rect: Option<Rect>,
+    proposal_rect: Option<Rect>,
 
     // Async execution handling
     routing_result_rx: Option<oneshot::Receiver<Result<RouteOutcome>>>,
@@ -113,6 +117,7 @@ struct App {
     progress_rx: Option<mpsc::Receiver<dexter_plugins::Progress>>,
     execution_result_rx: Option<oneshot::Receiver<Result<String>>>,
     progress: Option<dexter_plugins::Progress>,
+    generation_cache_policy: CachePolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +155,7 @@ impl App {
         Self {
             state: AppState::Input,
             input: String::new(),
+            input_cursor: 0,
             router: Router::new(router_client),
             executor: Executor::new(executor_client),
             plugins: vec![
@@ -161,6 +167,7 @@ impl App {
             selected_plugin: None,
             generated_command: None,
             command_draft: String::new(),
+            command_cursor: 0,
             logs: vec!["Dexter initialized. Ready for your command.".to_string()],
             tick_count: 0,
             current_context: None,
@@ -177,12 +184,14 @@ impl App {
             output_max_scroll: 0,
             output_text_width: 0,
             output_scrollbar_rect: None,
+            proposal_rect: None,
             routing_result_rx: None,
             generation_result_rx: None,
             dry_run_result_rx: None,
             progress_rx: None,
             execution_result_rx: None,
             progress: None,
+            generation_cache_policy: CachePolicy::Normal,
         }
     }
 
@@ -256,12 +265,12 @@ async fn main() -> Result<()> {
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
-    // Try enabling the kitty keyboard protocol so we can distinguish modifiers (e.g. Ctrl+Enter).
-    // This is terminal-dependent; we fall back gracefully when unsupported.
+    // Try enabling kitty keyboard disambiguation for cleaner modifier handling.
+    // We intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES because it can
+    // interfere with IME/CJK text input in some terminals.
     let mut keyboard_enhancement_enabled = false;
     if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
-        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         if execute!(stdout, PushKeyboardEnhancementFlags(flags)).is_ok() {
             keyboard_enhancement_enabled = true;
         }
@@ -379,12 +388,19 @@ async fn run_app(
                         summary: None,
                     });
                 let llm = app.executor.llm_client().clone();
+                let cache_policy = app.generation_cache_policy;
+                app.generation_cache_policy = CachePolicy::Normal;
 
                 let (tx, rx) = oneshot::channel();
                 tokio::spawn(async move {
                     let executor = Executor::new(llm);
                     let res = executor
-                        .generate_command(&input, &context, plugin.as_ref())
+                        .generate_command_with_policy(
+                            &input,
+                            &context,
+                            plugin.as_ref(),
+                            cache_policy,
+                        )
                         .await;
                     let _ = tx.send(res);
                 });
@@ -441,6 +457,7 @@ async fn run_app(
                                 RouteOutcome::Selected { plugin, .. } => {
                                     app.selected_plugin = Some(plugin.clone());
                                     app.logs.push(format!("Routed to plugin: {}", plugin));
+                                    app.generation_cache_policy = CachePolicy::Normal;
                                     app.state = AppState::PendingGeneration;
                                 }
                                 RouteOutcome::Unsupported { reason } => {
@@ -477,6 +494,7 @@ async fn run_app(
                             Ok(cmd) => {
                                 app.generated_command = Some(cmd.clone());
                                 app.command_draft = cmd.clone();
+                                app.command_cursor = char_count(&app.command_draft);
                                 app.logs.push(format!("Generated command: {}", cmd));
                                 app.dry_run_output = None;
                                 app.output_scroll = 0;
@@ -553,33 +571,38 @@ async fn run_app(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    let editing = app.focus == FocusArea::Proposal
+                        && matches!(app.state, AppState::Input | AppState::EditingCommand);
+
                     // Global output scrolling keys (work in most states).
-                    match key.code {
-                        KeyCode::Up => {
-                            app.output_scroll = app.output_scroll.saturating_sub(1);
-                            continue;
+                    if !editing {
+                        match key.code {
+                            KeyCode::Up => {
+                                app.output_scroll = app.output_scroll.saturating_sub(1);
+                                continue;
+                            }
+                            KeyCode::Down => {
+                                app.output_scroll = app.output_scroll.saturating_add(1);
+                                continue;
+                            }
+                            KeyCode::PageUp => {
+                                app.output_scroll = app.output_scroll.saturating_sub(10);
+                                continue;
+                            }
+                            KeyCode::PageDown => {
+                                app.output_scroll = app.output_scroll.saturating_add(10);
+                                continue;
+                            }
+                            KeyCode::Home => {
+                                app.output_scroll = 0;
+                                continue;
+                            }
+                            KeyCode::End => {
+                                app.output_scroll = app.output_max_scroll;
+                                continue;
+                            }
+                            _ => {}
                         }
-                        KeyCode::Down => {
-                            app.output_scroll = app.output_scroll.saturating_add(1);
-                            continue;
-                        }
-                        KeyCode::PageUp => {
-                            app.output_scroll = app.output_scroll.saturating_sub(10);
-                            continue;
-                        }
-                        KeyCode::PageDown => {
-                            app.output_scroll = app.output_scroll.saturating_add(10);
-                            continue;
-                        }
-                        KeyCode::Home => {
-                            app.output_scroll = 0;
-                            continue;
-                        }
-                        KeyCode::End => {
-                            app.output_scroll = app.output_max_scroll;
-                            continue;
-                        }
-                        _ => {}
                     }
 
                     // Focus switching / button navigation.
@@ -675,21 +698,58 @@ async fn run_app(
                             }
                             KeyCode::Enter => {
                                 if app.focus == FocusArea::Proposal {
-                                    app.input.push('\n');
+                                    insert_char_at_cursor(&mut app.input, &mut app.input_cursor, '\n');
+                                }
+                            }
+                            KeyCode::Left => {
+                                if app.focus == FocusArea::Proposal && app.input_cursor > 0 {
+                                    app.input_cursor -= 1;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if app.focus == FocusArea::Proposal
+                                    && app.input_cursor < char_count(&app.input)
+                                {
+                                    app.input_cursor += 1;
+                                }
+                            }
+                            KeyCode::Up => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_up(&app.input, &mut app.input_cursor);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_down(&app.input, &mut app.input_cursor);
+                                }
+                            }
+                            KeyCode::Home => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_line_start(&app.input, &mut app.input_cursor);
+                                }
+                            }
+                            KeyCode::End => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_line_end(&app.input, &mut app.input_cursor);
                                 }
                             }
                             KeyCode::Char(c) => {
                                 if app.focus == FocusArea::Proposal {
-                                    app.input.push(c);
+                                    insert_char_at_cursor(&mut app.input, &mut app.input_cursor, c);
                                     app.notice = None;
                                     app.clarify = None;
                                 }
                             }
                             KeyCode::Backspace => {
                                 if app.focus == FocusArea::Proposal {
-                                    app.input.pop();
+                                    delete_char_before_cursor(&mut app.input, &mut app.input_cursor);
                                     app.notice = None;
                                     app.clarify = None;
+                                }
+                            }
+                            KeyCode::Delete => {
+                                if app.focus == FocusArea::Proposal {
+                                    delete_char_at_cursor(&mut app.input, &mut app.input_cursor);
                                 }
                             }
                             KeyCode::Esc => return Ok(()),
@@ -763,16 +823,64 @@ async fn run_app(
                             {
                                 if app.focus == FocusArea::Proposal {
                                     app.command_draft.clear();
+                                    app.command_cursor = 0;
+                                }
+                            }
+                            KeyCode::Left => {
+                                if app.focus == FocusArea::Proposal && app.command_cursor > 0 {
+                                    app.command_cursor -= 1;
+                                }
+                            }
+                            KeyCode::Right => {
+                                if app.focus == FocusArea::Proposal
+                                    && app.command_cursor < char_count(&app.command_draft)
+                                {
+                                    app.command_cursor += 1;
+                                }
+                            }
+                            KeyCode::Up => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_up(&app.command_draft, &mut app.command_cursor);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_down(&app.command_draft, &mut app.command_cursor);
+                                }
+                            }
+                            KeyCode::Home => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_line_start(&app.command_draft, &mut app.command_cursor);
+                                }
+                            }
+                            KeyCode::End => {
+                                if app.focus == FocusArea::Proposal {
+                                    move_cursor_line_end(&app.command_draft, &mut app.command_cursor);
                                 }
                             }
                             KeyCode::Char(c) => {
                                 if app.focus == FocusArea::Proposal {
-                                    app.command_draft.push(c);
+                                    insert_char_at_cursor(
+                                        &mut app.command_draft,
+                                        &mut app.command_cursor,
+                                        c,
+                                    );
                                 }
                             }
                             KeyCode::Backspace => {
                                 if app.focus == FocusArea::Proposal {
-                                    app.command_draft.pop();
+                                    delete_char_before_cursor(
+                                        &mut app.command_draft,
+                                        &mut app.command_cursor,
+                                    );
+                                }
+                            }
+                            KeyCode::Delete => {
+                                if app.focus == FocusArea::Proposal {
+                                    delete_char_at_cursor(
+                                        &mut app.command_draft,
+                                        &mut app.command_cursor,
+                                    );
                                 }
                             }
                             KeyCode::Esc => {
@@ -813,6 +921,35 @@ async fn run_app(
                         | AppState::PendingDryRun
                         | AppState::Clarifying => {
                             // Non-interactive states
+                        }
+                    }
+                }
+                Event::Paste(text) => {
+                    let editing_proposal = app.focus == FocusArea::Proposal
+                        && matches!(app.state, AppState::Input | AppState::EditingCommand);
+                    if editing_proposal {
+                        match app.state {
+                            AppState::Input => {
+                                for ch in text.chars() {
+                                    insert_char_at_cursor(
+                                        &mut app.input,
+                                        &mut app.input_cursor,
+                                        ch,
+                                    );
+                                }
+                                app.notice = None;
+                                app.clarify = None;
+                            }
+                            AppState::EditingCommand => {
+                                for ch in text.chars() {
+                                    insert_char_at_cursor(
+                                        &mut app.command_draft,
+                                        &mut app.command_cursor,
+                                        ch,
+                                    );
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -870,6 +1007,31 @@ async fn run_app(
                                 && matches!(app.state, AppState::Input | AppState::EditingCommand)
                             {
                                 app.focus = FocusArea::Proposal;
+                                if let Some(area) = app.proposal_rect {
+                                    if point_in_rect(area, mouse.column, mouse.row) {
+                                        match app.state {
+                                            AppState::Input => {
+                                                set_cursor_from_click(
+                                                    &app.input,
+                                                    &mut app.input_cursor,
+                                                    area,
+                                                    mouse.column,
+                                                    mouse.row,
+                                                );
+                                            }
+                                            AppState::EditingCommand => {
+                                                set_cursor_from_click(
+                                                    &app.command_draft,
+                                                    &mut app.command_cursor,
+                                                    area,
+                                                    mouse.column,
+                                                    mouse.row,
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -896,9 +1058,11 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             if app.input.trim().is_empty() {
                 app.state = AppState::Input;
                 app.focus = FocusArea::Proposal;
+                app.input_cursor = char_count(&app.input);
             } else {
                 app.generated_command = None;
                 app.command_draft.clear();
+                app.command_cursor = 0;
                 app.dry_run_output = None;
                 app.output_scroll = 0;
                 app.selected_plugin = None;
@@ -908,6 +1072,7 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
                 app.progress_rx = None;
                 app.execution_result_rx = None;
                 app.progress = None;
+                app.generation_cache_policy = CachePolicy::Normal;
                 app.focus = FocusArea::FooterButtons;
                 app.footer_focus = 0;
                 app.state = AppState::PendingRouting;
@@ -915,6 +1080,7 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
         }
         FooterAction::ClearInput => {
             app.input.clear();
+            app.input_cursor = 0;
             app.notice = None;
             app.clarify = None;
             app.focus = FocusArea::Proposal;
@@ -925,11 +1091,13 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
                     .push(format!("Input submitted ({} chars)", app.input.len()));
                 app.generated_command = None;
                 app.command_draft.clear();
+                app.command_cursor = 0;
                 app.dry_run_output = None;
                 app.output_scroll = 0;
                 app.selected_plugin = None;
                 app.notice = None;
                 app.clarify = None;
+                app.generation_cache_policy = CachePolicy::Normal;
                 app.focus = FocusArea::FooterButtons;
                 app.footer_focus = 0;
                 app.state = AppState::PendingRouting;
@@ -944,11 +1112,14 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.state = AppState::Input;
             app.generated_command = None;
             app.command_draft.clear();
+            app.command_cursor = 0;
             app.dry_run_output = None;
             app.output_scroll = 0;
             app.selected_plugin = None;
             app.notice = None;
             app.clarify = None;
+            app.generation_cache_policy = CachePolicy::Normal;
+            app.input_cursor = char_count(&app.input);
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
         }
@@ -956,6 +1127,7 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             if let Some(cmd) = &app.generated_command {
                 app.command_draft = cmd.clone();
             }
+            app.command_cursor = char_count(&app.command_draft);
             app.state = AppState::EditingCommand;
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
@@ -964,21 +1136,26 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.state = AppState::Input;
             app.generated_command = None;
             app.command_draft.clear();
+            app.command_cursor = 0;
             app.dry_run_output = None;
             app.output_scroll = 0;
             app.selected_plugin = None;
             app.notice = None;
             app.clarify = None;
+            app.generation_cache_policy = CachePolicy::Normal;
+            app.input_cursor = char_count(&app.input);
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
         }
         FooterAction::Regenerate => {
             app.generated_command = None;
             app.command_draft.clear();
+            app.command_cursor = 0;
             app.dry_run_output = None;
             app.output_scroll = 0;
             app.notice = None;
             app.clarify = None;
+            app.generation_cache_policy = CachePolicy::Bypass;
             app.focus = FocusArea::FooterButtons;
             app.footer_focus = 0;
             app.state = AppState::PendingGeneration;
@@ -988,6 +1165,7 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             if !new_cmd.is_empty() {
                 app.generated_command = Some(new_cmd.clone());
                 app.logs.push(format!("Command edited: {}", new_cmd));
+                app.command_cursor = char_count(&app.command_draft);
                 app.dry_run_output = None;
                 app.output_scroll = 0;
                 app.focus = FocusArea::FooterButtons;
@@ -999,6 +1177,7 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             if let Some(cmd) = &app.generated_command {
                 app.command_draft = cmd.clone();
             }
+            app.command_cursor = char_count(&app.command_draft);
             app.state = AppState::AwaitingConfirmation;
             app.focus = FocusArea::FooterButtons;
             app.footer_focus = 0;
@@ -1007,11 +1186,14 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             app.state = AppState::Input;
             app.generated_command = None;
             app.command_draft.clear();
+            app.command_cursor = 0;
             app.dry_run_output = None;
             app.output_scroll = 0;
+            app.generation_cache_policy = CachePolicy::Normal;
             app.selected_plugin = None;
             app.notice = None;
             app.clarify = None;
+            app.input_cursor = char_count(&app.input);
             app.focus = FocusArea::Proposal;
             app.footer_focus = 0;
         }
@@ -1019,9 +1201,11 @@ async fn perform_footer_action(app: &mut App, action: FooterAction) -> Result<bo
             if let Some(payload) = &app.clarify {
                 if let Some(opt) = payload.options.get(idx) {
                     app.input = opt.resolved_intent.clone();
+                    app.input_cursor = char_count(&app.input);
                     app.logs.push(format!("Clarify selected: {}", opt.label));
                     app.generated_command = None;
                     app.command_draft.clear();
+                    app.command_cursor = 0;
                     app.dry_run_output = None;
                     app.output_scroll = 0;
                     app.selected_plugin = None;
@@ -1082,6 +1266,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 app.theme.input_text_style,
                 Some(app.theme.input_cursor_style),
                 cursor_visible,
+                Some(app.input_cursor),
             ));
             (" USER INPUT ", lines)
         }
@@ -1100,6 +1285,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 app.theme.proposal_cmd_style,
                 Some(cmd_cursor),
                 cursor_visible,
+                Some(app.command_cursor),
             ));
             (" EDIT COMMAND ", lines)
         }
@@ -1118,6 +1304,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     app.theme.header_subtitle_style,
                     None,
                     false,
+                    None,
                 ));
                 lines
             },
@@ -1135,6 +1322,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                             app.theme.proposal_cmd_style,
                             None,
                             false,
+                            None,
                         ));
                         lines
                     },
@@ -1151,6 +1339,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                             app.theme.error_style,
                             None,
                             false,
+                            None,
                         ));
                         lines
                     },
@@ -1168,6 +1357,12 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .title(Span::styled(proposal_title, app.theme.header_title_style)),
         );
     f.render_widget(proposal_block, main_layout[1]);
+    app.proposal_rect = Some(Rect {
+        x: main_layout[1].x + 1,
+        y: main_layout[1].y + 1,
+        width: main_layout[1].width.saturating_sub(2),
+        height: main_layout[1].height.saturating_sub(2),
+    });
 
     // --- SECTION 3: BUTTON BAR (INTERACTIVE) ---
     render_button_bar(f, app, main_layout[2]);
@@ -1369,33 +1564,224 @@ fn render_multiline_prompt<'a>(
     text_style: Style,
     cursor_style: Option<Style>,
     cursor_visible: bool,
+    cursor_pos: Option<usize>,
 ) -> Vec<Line<'a>> {
     let mut out = Vec::new();
     let mut parts: Vec<&str> = text.split('\n').collect();
     if parts.is_empty() {
         parts.push("");
     }
+    let mut remaining = cursor_pos.unwrap_or(0);
+    let mut cursor_pending = cursor_pos.is_some();
 
     for (idx, line) in parts.iter().enumerate() {
-        let is_last = idx == parts.len().saturating_sub(1);
         let prefix = if idx == 0 {
             first_prefix.clone()
         } else {
             continuation_prefix.clone()
         };
 
-        let mut spans = vec![prefix, Span::styled(*line, text_style)];
-        if is_last {
-            if let Some(cursor_style) = cursor_style {
-                if cursor_visible {
-                    // Block cursor: a styled space cell.
-                    spans.push(Span::styled(" ", cursor_style));
+        let line_len = line.chars().count();
+        if cursor_pending && remaining <= line_len {
+            let (before, current, after) = split_line_at_char(line, remaining);
+            let mut spans = vec![prefix];
+
+            if !before.is_empty() {
+                spans.push(Span::styled(before, text_style));
+            }
+
+            match current {
+                Some(ch) => {
+                    let ch_str = ch.to_string();
+                    if cursor_visible {
+                        if let Some(cursor_style) = cursor_style {
+                            spans.push(Span::styled(ch_str, cursor_style));
+                        } else {
+                            spans.push(Span::styled(ch_str, text_style));
+                        }
+                    } else {
+                        spans.push(Span::styled(ch_str, text_style));
+                    }
+                }
+                None => {
+                    if cursor_visible {
+                        if let Some(cursor_style) = cursor_style {
+                            spans.push(Span::styled(" ", cursor_style));
+                        }
+                    }
                 }
             }
+
+            if !after.is_empty() {
+                spans.push(Span::styled(after, text_style));
+            }
+            out.push(Line::from(spans));
+            cursor_pending = false;
+        } else {
+            out.push(Line::from(vec![
+                prefix,
+                Span::styled(*line, text_style),
+            ]));
+            if cursor_pending {
+                remaining = remaining.saturating_sub(line_len + 1);
+            }
         }
-        out.push(Line::from(spans));
     }
     out
+}
+
+fn split_line_at_char(line: &str, idx: usize) -> (String, Option<char>, String) {
+    let mut before = String::new();
+    let mut current = None;
+    let mut after = String::new();
+
+    for (i, ch) in line.chars().enumerate() {
+        if i < idx {
+            before.push(ch);
+        } else if i == idx {
+            current = Some(ch);
+        } else {
+            after.push(ch);
+        }
+    }
+
+    (before, current, after)
+}
+
+fn char_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn byte_index(text: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    if let Some((idx, _)) = text.char_indices().nth(char_idx) {
+        return idx;
+    }
+    text.len()
+}
+
+fn insert_char_at_cursor(text: &mut String, cursor: &mut usize, ch: char) {
+    let idx = byte_index(text, *cursor);
+    text.insert(idx, ch);
+    *cursor += 1;
+}
+
+fn delete_char_before_cursor(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let start = byte_index(text, *cursor - 1);
+    let end = byte_index(text, *cursor);
+    if start < end {
+        text.replace_range(start..end, "");
+        *cursor -= 1;
+    }
+}
+
+fn delete_char_at_cursor(text: &mut String, cursor: &mut usize) {
+    let len = char_count(text);
+    if *cursor >= len {
+        return;
+    }
+    let start = byte_index(text, *cursor);
+    let end = byte_index(text, *cursor + 1);
+    if start < end {
+        text.replace_range(start..end, "");
+    }
+}
+
+fn line_lengths(text: &str) -> Vec<usize> {
+    let mut lines: Vec<usize> = text.split('\n').map(|line| line.chars().count()).collect();
+    if lines.is_empty() {
+        lines.push(0);
+    }
+    lines
+}
+
+fn cursor_line_col(line_lens: &[usize], cursor: usize) -> (usize, usize) {
+    let mut remaining = cursor;
+    for (i, len) in line_lens.iter().enumerate() {
+        if remaining <= *len {
+            return (i, remaining);
+        }
+        remaining = remaining.saturating_sub(len + 1);
+    }
+    let last = line_lens.len().saturating_sub(1);
+    let last_len = *line_lens.get(last).unwrap_or(&0);
+    (last, last_len)
+}
+
+fn cursor_from_line_col(line_lens: &[usize], line_idx: usize, col: usize) -> usize {
+    let mut idx = 0usize;
+    for i in 0..line_idx {
+        idx = idx.saturating_add(line_lens.get(i).copied().unwrap_or(0) + 1);
+    }
+    let line_len = line_lens.get(line_idx).copied().unwrap_or(0);
+    idx.saturating_add(col.min(line_len))
+}
+
+fn move_cursor_up(text: &str, cursor: &mut usize) {
+    let line_lens = line_lengths(text);
+    let (line, col) = cursor_line_col(&line_lens, *cursor);
+    if line == 0 {
+        *cursor = cursor_from_line_col(&line_lens, 0, col);
+        return;
+    }
+    *cursor = cursor_from_line_col(&line_lens, line - 1, col);
+}
+
+fn move_cursor_down(text: &str, cursor: &mut usize) {
+    let line_lens = line_lengths(text);
+    let (line, col) = cursor_line_col(&line_lens, *cursor);
+    if line + 1 >= line_lens.len() {
+        *cursor = cursor_from_line_col(&line_lens, line, col);
+        return;
+    }
+    *cursor = cursor_from_line_col(&line_lens, line + 1, col);
+}
+
+fn move_cursor_line_start(text: &str, cursor: &mut usize) {
+    let line_lens = line_lengths(text);
+    let (line, _) = cursor_line_col(&line_lens, *cursor);
+    *cursor = cursor_from_line_col(&line_lens, line, 0);
+}
+
+fn move_cursor_line_end(text: &str, cursor: &mut usize) {
+    let line_lens = line_lengths(text);
+    let (line, _) = cursor_line_col(&line_lens, *cursor);
+    let line_len = line_lens.get(line).copied().unwrap_or(0);
+    *cursor = cursor_from_line_col(&line_lens, line, line_len);
+}
+
+fn point_in_rect(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+fn set_cursor_from_click(text: &str, cursor: &mut usize, area: Rect, col: u16, row: u16) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let row_in_area = row.saturating_sub(area.y) as usize;
+    let col_in_area = col.saturating_sub(area.x) as usize;
+
+    // Account for the leading blank line in the proposal pane.
+    let text_row = row_in_area.saturating_sub(1);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line_idx = text_row.min(lines.len().saturating_sub(1));
+    let line = lines.get(line_idx).copied().unwrap_or("");
+
+    let prefix_len = 3usize; // " > " or "   "
+    let col_in_text = col_in_area.saturating_sub(prefix_len);
+    let target_col = col_in_text.min(line.chars().count());
+
+    let line_lens = line_lengths(text);
+    *cursor = cursor_from_line_col(&line_lens, line_idx, target_col);
 }
 
 fn build_output_view<'a>(app: &'a App) -> (&'static str, Vec<Line<'a>>) {
@@ -1990,6 +2376,7 @@ impl SetupApp {
             selected_model_idx: 0,
             available_themes: vec![
                 ("auto", "🔄 Auto (Follow system appearance)"),
+                ("dark", "🌑 Dark (Blue on charcoal)"),
                 ("retro", "🌙 Retro (Classic amber CRT aesthetic)"),
                 ("light", "☀️ Light (Clean blue/white for light terminals)"),
             ],

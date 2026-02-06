@@ -1,5 +1,6 @@
 use crate::context::FileContext;
 use crate::llm::LlmClient;
+use crate::CachePolicy;
 use crate::safety::SafetyGuard;
 use anyhow::{Context, Result};
 use dexter_plugins::Plugin;
@@ -30,6 +31,17 @@ impl Executor {
         context: &FileContext,
         plugin: &dyn Plugin,
     ) -> Result<String> {
+        self.generate_command_with_policy(user_input, context, plugin, CachePolicy::Normal)
+            .await
+    }
+
+    pub async fn generate_command_with_policy(
+        &self,
+        user_input: &str,
+        context: &FileContext,
+        plugin: &dyn Plugin,
+        cache_policy: CachePolicy,
+    ) -> Result<String> {
         let context_str = if let Some(summary) = &context.summary {
             summary.clone()
         } else {
@@ -46,9 +58,10 @@ impl Executor {
 
         let command = self
             .llm_client
-            .completion(
+            .completion_with_policy(
                 &system_prompt,
                 "Please generate the exact command based on the instructions above.",
+                cache_policy,
             )
             .await?;
         let clean_command = command

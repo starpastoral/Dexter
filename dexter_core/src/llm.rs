@@ -1,6 +1,17 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+const DEFAULT_CACHE_CAPACITY: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePolicy {
+    Normal,
+    Bypass,
+}
 
 #[derive(Debug, Clone)]
 pub struct LlmClient {
@@ -8,6 +19,8 @@ pub struct LlmClient {
     api_key: String,
     base_url: String,
     model: String,
+    cache: Arc<RwLock<HashMap<String, String>>>,
+    cache_capacity: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,10 +67,22 @@ impl LlmClient {
             api_key,
             base_url,
             model,
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
     }
 
     pub async fn completion(&self, system_prompt: &str, user_input: &str) -> Result<String> {
+        self.completion_with_policy(system_prompt, user_input, CachePolicy::Normal)
+            .await
+    }
+
+    pub async fn completion_with_policy(
+        &self,
+        system_prompt: &str,
+        user_input: &str,
+        cache_policy: CachePolicy,
+    ) -> Result<String> {
         let is_gemini = self.base_url.contains("generativelanguage.googleapis.com");
 
         // If it's Gemini, we often get better results or avoid safety refusals by
@@ -80,11 +105,22 @@ impl LlmClient {
             ]
         };
 
-        self.execute_completion(messages).await
+        self.execute_completion(messages, cache_policy).await
     }
 
-    async fn execute_completion(&self, messages: Vec<ChatMessage>) -> Result<String> {
+    async fn execute_completion(
+        &self,
+        messages: Vec<ChatMessage>,
+        cache_policy: CachePolicy,
+    ) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let cache_key = self.build_cache_key(&messages, 0.1)?;
+
+        if cache_policy == CachePolicy::Normal {
+            if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
+                return Ok(cached);
+            }
+        }
 
         let request_body = ChatRequest {
             model: self.model.clone(),
@@ -130,7 +166,19 @@ impl LlmClient {
                     first_choice
                 ));
             }
-            Ok(msg.content.clone())
+            let content = msg.content.clone();
+
+            if cache_policy == CachePolicy::Normal {
+                let mut cache = self.cache.write().await;
+                if cache.len() >= self.cache_capacity {
+                    if let Some(any_key) = cache.keys().next().cloned() {
+                        cache.remove(&any_key);
+                    }
+                }
+                cache.insert(cache_key, content.clone());
+            }
+
+            Ok(content)
         } else if let Some(reason) = first_choice.finish_reason.as_ref() {
             if reason.to_lowercase().contains("content_filter") {
                 Err(anyhow!("Gemini content filter triggered: PROHIBITED_CONTENT. Try rephrasing your request."))
@@ -143,6 +191,15 @@ impl LlmClient {
                 first_choice
             ))
         }
+    }
+
+    fn build_cache_key(&self, messages: &[ChatMessage], temperature: f32) -> Result<String> {
+        let payload = serde_json::to_string(messages)
+            .map_err(|e| anyhow!("Failed to serialize messages for cache key: {}", e))?;
+        Ok(format!(
+            "{}|{}|{:.3}|{}",
+            self.base_url, self.model, temperature, payload
+        ))
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {

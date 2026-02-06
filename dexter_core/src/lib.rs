@@ -1,5 +1,5 @@
 pub use config::Config;
-pub use llm::LlmClient;
+pub use llm::{CachePolicy, LlmClient};
 pub use context::{ContextScanner, FileContext};
 pub use router::Router;
 pub use router::{ClarifyOption, ClarifySource, RouteOutcome};

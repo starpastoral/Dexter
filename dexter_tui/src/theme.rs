@@ -34,14 +34,15 @@ pub struct Theme {
 impl Theme {
     pub fn from_config(name: &str) -> Self {
         match name.to_lowercase().as_str() {
+            "dark" => Self::dark(),
             "light" => Self::light(),
             "auto" => {
                 // Detect system theme
                 match dark_light::detect() {
-                    dark_light::Mode::Dark => Self::retro(),
+                    dark_light::Mode::Dark => Self::dark(),
                     dark_light::Mode::Light => Self::light(),
-                    // Default to retro if detection fails
-                    dark_light::Mode::Default => Self::retro(),
+                    // Default to dark if detection fails
+                    dark_light::Mode::Default => Self::dark(),
                 }
             }
             _ => Self::retro(), // Default to retro for "retro" or unknown values
@@ -121,6 +122,44 @@ impl Theme {
 
             error_style: Style::default().fg(red_alert),
             success_style: Style::default().fg(Color::White).bg(accent),
+        }
+    }
+
+    pub fn dark() -> Self {
+        let amber = Color::Rgb(255, 176, 0);
+        let amber_dim = Color::Rgb(150, 110, 0);
+        let bg = Color::Rgb(14, 12, 10);
+        let red_alert = Color::Rgb(255, 80, 80);
+
+        Self {
+            base_style: Style::default().fg(amber).bg(bg),
+            border_style: Style::default().fg(amber_dim),
+
+            header_title_style: Style::default().fg(amber).add_modifier(Modifier::BOLD),
+            header_subtitle_style: Style::default().fg(amber_dim),
+
+            input_prompt_style: Style::default().fg(amber).add_modifier(Modifier::BOLD),
+            input_text_style: Style::default().fg(Color::White),
+            input_cursor_style: Style::default()
+                .bg(amber)
+                .fg(bg)
+                .add_modifier(Modifier::RAPID_BLINK),
+
+            proposal_cmd_style: Style::default().bg(amber).fg(bg),
+
+            processing_spinner_style: Style::default().fg(amber).add_modifier(Modifier::BOLD),
+            processing_text_style: Style::default().fg(amber),
+
+            diff_header_style: Style::default().fg(amber).add_modifier(Modifier::BOLD),
+            diff_added_style: Style::default().fg(amber),
+            diff_removed_style: Style::default().fg(amber_dim),
+
+            footer_text_style: Style::default().fg(amber_dim),
+            footer_highlight_style: Style::default().fg(amber),
+            footer_key_style: Style::default().fg(bg).bg(amber),
+
+            error_style: Style::default().fg(red_alert),
+            success_style: Style::default().fg(bg).bg(amber),
         }
     }
 }
