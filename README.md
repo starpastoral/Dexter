@@ -2,7 +2,7 @@
 
 > **The Retro-Futurist AI Command Copilot**
 
-Dexter is a terminal-based AI assistant that routes natural-language intent to specialized CLI tools (such as `f2`, `ffmpeg`, `pandoc`, and `yt-dlp`), builds commands, and enforces a confirmation-first execution flow.
+Dexter is a terminal-based AI assistant that routes natural-language intent to specialized CLI tools (such as `f2`, `ffmpeg`, `pandoc`, `qpdf`, `ocrmypdf`, and `yt-dlp`), builds commands, and enforces a confirmation-first execution flow.
 
 ## Features
 
@@ -30,6 +30,9 @@ Dexter is a terminal-based AI assistant that routes natural-language intent to s
   - High-risk commands are blocked.
   - No execution without explicit confirmation.
   - Working-directory context is included for safer command generation.
+- **PDF Power Tools**:
+  - `qpdf` for PDF structural checks, linearization, page selection/merge, and encryption/decryption workflows.
+  - `ocrmypdf` for searchable OCR, language-aware OCR, and scan cleanup workflows.
 - **Retro TUI (ratatui)**:
   - Themed terminal UI.
   - Narrow-terminal adaptive layout (compact footer/buttons and dynamic setup table widths).
@@ -43,6 +46,8 @@ Dexter is a terminal-based AI assistant that routes natural-language intent to s
 - `ffmpeg` in `$PATH`
 - `yt-dlp` in `$PATH`
 - `pandoc` in `$PATH` (optional; required for document conversions)
+- `qpdf` in `$PATH` (optional; required for PDF structural workflows)
+- `ocrmypdf` in `$PATH` (optional; required for OCR/searchable PDF workflows)
 
 ### Quick Install
 

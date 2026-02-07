@@ -3,7 +3,10 @@ use dexter_core::{
     CachePolicy, ClarifyOption, Config, ContextScanner, Executor, LlmClient, RouteOutcome, Router,
     SafetyGuard,
 };
-use dexter_plugins::{F2Plugin, FFmpegPlugin, PandocPlugin, Plugin, PreviewContent, YtDlpPlugin};
+use dexter_plugins::{
+    F2Plugin, FFmpegPlugin, OcrmypdfPlugin, PandocPlugin, Plugin, PreviewContent, QpdfPlugin,
+    YtDlpPlugin,
+};
 use ratatui::layout::Rect;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -133,6 +136,8 @@ impl App {
                 Arc::new(F2Plugin) as Arc<dyn Plugin>,
                 Arc::new(FFmpegPlugin) as Arc<dyn Plugin>,
                 Arc::new(PandocPlugin) as Arc<dyn Plugin>,
+                Arc::new(QpdfPlugin) as Arc<dyn Plugin>,
+                Arc::new(OcrmypdfPlugin) as Arc<dyn Plugin>,
                 Arc::new(YtDlpPlugin) as Arc<dyn Plugin>,
             ],
             selected_plugin: None,

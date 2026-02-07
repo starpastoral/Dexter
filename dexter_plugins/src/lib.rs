@@ -1,12 +1,16 @@
 pub mod command_exec;
 pub mod f2;
 pub mod ffmpeg;
+pub mod ocrmypdf;
 pub mod pandoc;
+pub mod qpdf;
 pub mod ytdlp;
 
 pub use f2::F2Plugin;
 pub use ffmpeg::FFmpegPlugin;
+pub use ocrmypdf::OcrmypdfPlugin;
 pub use pandoc::PandocPlugin;
+pub use qpdf::QpdfPlugin;
 pub use ytdlp::YtDlpPlugin;
 
 use anyhow::Result;
