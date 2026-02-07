@@ -4038,11 +4038,17 @@ fn render_setup_model_order_table(f: &mut Frame, app: &SetupApp, area: Rect) {
 fn build_provider_entries(config: &Config) -> Vec<SetupProviderEntry> {
     let existing = config.effective_providers();
     let supported = [
+        ProviderKind::OpenAI,
+        ProviderKind::Anthropic,
+        ProviderKind::OpenRouter,
+        ProviderKind::Moonshot,
         ProviderKind::Gemini,
         ProviderKind::Deepseek,
         ProviderKind::Groq,
         ProviderKind::Baseten,
         ProviderKind::Ollama,
+        ProviderKind::OpenAICompatible,
+        ProviderKind::AnthropicCompatible,
     ];
 
     let mut entries = supported

@@ -38,34 +38,53 @@ impl Default for ApiKeys {
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
+    #[serde(rename = "openai")]
+    OpenAI,
+    Anthropic,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+    Moonshot,
     Gemini,
     Deepseek,
     Groq,
     Baseten,
     Ollama,
-    Custom,
+    #[serde(rename = "openai_compatible", alias = "custom")]
+    OpenAICompatible,
+    #[serde(rename = "anthropic_compatible")]
+    AnthropicCompatible,
 }
 
 impl ProviderKind {
     pub fn display_name(self) -> &'static str {
         match self {
+            ProviderKind::OpenAI => "OPENAI",
+            ProviderKind::Anthropic => "ANTHROPIC",
+            ProviderKind::OpenRouter => "OPENROUTER",
+            ProviderKind::Moonshot => "MOONSHOT",
             ProviderKind::Gemini => "GEMINI",
             ProviderKind::Deepseek => "DEEPSEEK",
             ProviderKind::Groq => "GROQ",
             ProviderKind::Baseten => "BASETEN",
             ProviderKind::Ollama => "OLLAMA",
-            ProviderKind::Custom => "CUSTOM",
+            ProviderKind::OpenAICompatible => "OPENAI-COMPATIBLE",
+            ProviderKind::AnthropicCompatible => "ANTHROPIC-COMPATIBLE",
         }
     }
 
     pub fn default_base_url(self) -> &'static str {
         match self {
+            ProviderKind::OpenAI => "https://api.openai.com/v1",
+            ProviderKind::Anthropic => "https://api.anthropic.com/v1",
+            ProviderKind::OpenRouter => "https://openrouter.ai/api/v1",
+            ProviderKind::Moonshot => "https://api.moonshot.ai/v1",
             ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
             ProviderKind::Deepseek => "https://api.deepseek.com/v1",
             ProviderKind::Groq => "https://api.groq.com/openai/v1",
             ProviderKind::Baseten => "https://inference.baseten.co/v1",
             ProviderKind::Ollama => "http://localhost:11434/v1",
-            ProviderKind::Custom => "https://api.openai.com/v1",
+            ProviderKind::OpenAICompatible => "https://api.openai.com/v1",
+            ProviderKind::AnthropicCompatible => "https://api.anthropic.com/v1",
         }
     }
 
@@ -73,12 +92,29 @@ impl ProviderKind {
         match self {
             ProviderKind::Baseten => ProviderAuth::ApiKey,
             ProviderKind::Ollama => ProviderAuth::None,
+            ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => ProviderAuth::XApiKey,
             _ => ProviderAuth::Bearer,
         }
     }
 
     pub fn default_models(self) -> Vec<String> {
         match self {
+            ProviderKind::OpenAI => vec![
+                "gpt-5-mini".to_string(),
+                "gpt-5".to_string(),
+                "gpt-4.1-mini".to_string(),
+            ],
+            ProviderKind::Anthropic => vec![
+                "claude-sonnet-4-0".to_string(),
+                "claude-3-5-sonnet-latest".to_string(),
+            ],
+            ProviderKind::OpenRouter => vec![
+                "openai/gpt-4o-mini".to_string(),
+                "anthropic/claude-3.5-sonnet".to_string(),
+            ],
+            ProviderKind::Moonshot => {
+                vec!["moonshot-v1-8k".to_string(), "moonshot-v1-32k".to_string()]
+            }
             ProviderKind::Gemini => vec![
                 "gemini-2.5-flash-lite".to_string(),
                 "gemini-2.5-flash".to_string(),
@@ -101,7 +137,7 @@ impl ProviderKind {
                 "qwen2.5".to_string(),
                 "gemma3".to_string(),
             ],
-            ProviderKind::Custom => Vec::new(),
+            ProviderKind::OpenAICompatible | ProviderKind::AnthropicCompatible => Vec::new(),
         }
     }
 }
@@ -112,6 +148,7 @@ pub enum ProviderAuth {
     #[default]
     Bearer,
     ApiKey,
+    XApiKey,
     None,
 }
 
@@ -192,7 +229,7 @@ impl ProviderConfig {
 
         match self.auth {
             ProviderAuth::None => true,
-            ProviderAuth::Bearer | ProviderAuth::ApiKey => self
+            ProviderAuth::Bearer | ProviderAuth::ApiKey | ProviderAuth::XApiKey => self
                 .api_key
                 .as_ref()
                 .map(|v| !v.trim().is_empty())
@@ -335,7 +372,7 @@ impl Config {
             providers.insert(
                 0,
                 ProviderConfig {
-                    kind: ProviderKind::Custom,
+                    kind: ProviderKind::OpenAICompatible,
                     name: Some("Legacy Custom Endpoint".to_string()),
                     api_key: api_key.clone(),
                     base_url,

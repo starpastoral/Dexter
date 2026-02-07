@@ -57,6 +57,34 @@ struct ChatResponse {
     choices: Vec<Choice>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicRequest {
+    model: String,
+    messages: Vec<AnthropicMessage>,
+    system: String,
+    temperature: f32,
+    max_tokens: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContentBlock {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    content: Option<Vec<AnthropicContentBlock>>,
+    stop_reason: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ModelListData {
     models: Option<Vec<Model>>, // Gemini and Ollama style
@@ -82,6 +110,13 @@ impl LlmClient {
                 }
             }
             ProviderKind::Ollama => ProviderAuth::None,
+            ProviderKind::Anthropic | ProviderKind::AnthropicCompatible => {
+                if api_key.is_some() {
+                    ProviderAuth::XApiKey
+                } else {
+                    ProviderAuth::None
+                }
+            }
             _ => {
                 if api_key.is_some() {
                     ProviderAuth::Bearer
@@ -250,9 +285,8 @@ impl LlmClient {
     ) -> Result<String> {
         let mut errors = Vec::new();
         for target in &self.targets {
-            let messages = build_messages(target, system_prompt, user_input);
             match self
-                .execute_completion_for_target(target, messages, cache_policy)
+                .execute_completion_for_target(target, system_prompt, user_input, cache_policy)
                 .await
             {
                 Ok(content) => return Ok(content),
@@ -272,10 +306,38 @@ impl LlmClient {
     async fn execute_completion_for_target(
         &self,
         target: &LlmTarget,
-        messages: Vec<ChatMessage>,
+        system_prompt: &str,
+        user_input: &str,
+        cache_policy: CachePolicy,
+    ) -> Result<String> {
+        if is_anthropic_target(target) {
+            self.execute_anthropic_completion_for_target(
+                target,
+                system_prompt,
+                user_input,
+                cache_policy,
+            )
+            .await
+        } else {
+            self.execute_openai_completion_for_target(
+                target,
+                system_prompt,
+                user_input,
+                cache_policy,
+            )
+            .await
+        }
+    }
+
+    async fn execute_openai_completion_for_target(
+        &self,
+        target: &LlmTarget,
+        system_prompt: &str,
+        user_input: &str,
         cache_policy: CachePolicy,
     ) -> Result<String> {
         let url = format!("{}/chat/completions", target.base_url.trim_end_matches('/'));
+        let messages = build_openai_messages(target, system_prompt, user_input);
         let cache_key = self.build_cache_key(target, &messages, 0.1)?;
 
         if cache_policy == CachePolicy::Normal {
@@ -372,6 +434,118 @@ impl LlmClient {
         }
     }
 
+    async fn execute_anthropic_completion_for_target(
+        &self,
+        target: &LlmTarget,
+        system_prompt: &str,
+        user_input: &str,
+        cache_policy: CachePolicy,
+    ) -> Result<String> {
+        let url = format!("{}/messages", target.base_url.trim_end_matches('/'));
+        let cache_key =
+            self.build_anthropic_cache_key(target, system_prompt, user_input, 0.1, 4096)?;
+
+        if cache_policy == CachePolicy::Normal {
+            if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
+                return Ok(cached);
+            }
+        }
+
+        let request_body = AnthropicRequest {
+            model: target.model.clone(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: user_input.to_string(),
+            }],
+            system: system_prompt.to_string(),
+            temperature: 0.1,
+            max_tokens: 4096,
+        };
+
+        let mut request = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json");
+        request = apply_auth_header(request, target)?;
+        let response = request.json(&request_body).send().await?;
+
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            let lower = text.to_lowercase();
+            let hint = if status.as_u16() == 429
+                || lower.contains("rate limit")
+                || lower.contains("quota")
+            {
+                " (quota/rate-limit, trying fallback)"
+            } else if lower.contains("content_filter")
+                || lower.contains("safety")
+                || lower.contains("blocked")
+            {
+                " (content policy block, trying fallback)"
+            } else {
+                ""
+            };
+            return Err(anyhow!(
+                "LLM API Error (Status {}): {}{}",
+                status,
+                truncate_error(&text),
+                hint
+            ));
+        }
+
+        let parsed: AnthropicResponse = serde_json::from_str(&text).map_err(|e| {
+            anyhow!(
+                "Failed to parse LLM response: {} | Raw response: {}",
+                e,
+                text
+            )
+        })?;
+
+        let mut chunks = Vec::new();
+        if let Some(content) = parsed.content {
+            for block in content {
+                if block.kind.as_deref() == Some("text") {
+                    if let Some(text) = block.text {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            chunks.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if chunks.is_empty() {
+            if let Some(reason) = parsed.stop_reason {
+                if reason.to_lowercase().contains("safety")
+                    || reason.to_lowercase().contains("content_filter")
+                {
+                    return Err(anyhow!(
+                        "content filter triggered by current provider/model; trying fallback"
+                    ));
+                }
+                return Err(anyhow!("LLM stopped execution. Reason: {}", reason));
+            }
+            return Err(anyhow!("No text content in Anthropic response"));
+        }
+
+        let content = chunks.join("\n\n");
+
+        if cache_policy == CachePolicy::Normal {
+            let mut cache = self.cache.write().await;
+            if cache.len() >= self.cache_capacity {
+                if let Some(any_key) = cache.keys().next().cloned() {
+                    cache.remove(&any_key);
+                }
+            }
+            cache.insert(cache_key, content.clone());
+        }
+
+        Ok(content)
+    }
+
     fn build_cache_key(
         &self,
         target: &LlmTarget,
@@ -383,6 +557,26 @@ impl LlmClient {
         Ok(format!(
             "{}|{}|{}|{:.3}|{}",
             target.provider_name, target.base_url, target.model, temperature, payload
+        ))
+    }
+
+    fn build_anthropic_cache_key(
+        &self,
+        target: &LlmTarget,
+        system_prompt: &str,
+        user_input: &str,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let payload = serde_json::json!({
+            "system": system_prompt,
+            "user": user_input,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        });
+        Ok(format!(
+            "{}|{}|{}|anthropic|{}",
+            target.provider_name, target.base_url, target.model, payload
         ))
     }
 
@@ -525,7 +719,11 @@ fn parse_model_list(text: &str) -> Result<Vec<String>> {
     Ok(model_names)
 }
 
-fn build_messages(target: &LlmTarget, system_prompt: &str, user_input: &str) -> Vec<ChatMessage> {
+fn build_openai_messages(
+    target: &LlmTarget,
+    system_prompt: &str,
+    user_input: &str,
+) -> Vec<ChatMessage> {
     if is_gemini_target(target) {
         vec![ChatMessage {
             role: "user".to_string(),
@@ -552,6 +750,13 @@ fn is_gemini_target(target: &LlmTarget) -> bool {
             .contains("generativelanguage.googleapis.com")
 }
 
+fn is_anthropic_target(target: &LlmTarget) -> bool {
+    matches!(
+        target.kind,
+        ProviderKind::Anthropic | ProviderKind::AnthropicCompatible
+    ) || target.base_url.contains("anthropic.com")
+}
+
 fn apply_auth_header(
     request: reqwest::RequestBuilder,
     target: &LlmTarget,
@@ -572,12 +777,31 @@ fn apply_auth_header(
                 .ok_or_else(|| anyhow!("Missing API key for provider {}", target.provider_name))?;
             Ok(request.header("Authorization", format!("Api-Key {}", key)))
         }
+        ProviderAuth::XApiKey => {
+            let key = target
+                .api_key
+                .as_ref()
+                .ok_or_else(|| anyhow!("Missing API key for provider {}", target.provider_name))?;
+            Ok(request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01"))
+        }
     }
 }
 
 fn infer_provider_kind(base_url: &str) -> ProviderKind {
     let lower = base_url.to_lowercase();
-    if lower.contains("generativelanguage.googleapis.com") || lower.contains("googleapis.com") {
+    if lower.contains("api.openai.com") {
+        ProviderKind::OpenAI
+    } else if lower.contains("api.anthropic.com") {
+        ProviderKind::Anthropic
+    } else if lower.contains("openrouter.ai") {
+        ProviderKind::OpenRouter
+    } else if lower.contains("moonshot.ai") {
+        ProviderKind::Moonshot
+    } else if lower.contains("generativelanguage.googleapis.com")
+        || lower.contains("googleapis.com")
+    {
         ProviderKind::Gemini
     } else if lower.contains("deepseek.com") {
         ProviderKind::Deepseek
@@ -587,8 +811,10 @@ fn infer_provider_kind(base_url: &str) -> ProviderKind {
         ProviderKind::Baseten
     } else if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
         ProviderKind::Ollama
+    } else if lower.contains("anthropic") {
+        ProviderKind::AnthropicCompatible
     } else {
-        ProviderKind::Custom
+        ProviderKind::OpenAICompatible
     }
 }
 

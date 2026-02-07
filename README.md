@@ -8,11 +8,17 @@ Dexter is a terminal-based AI assistant that routes natural-language intent to s
 
 - **Intelligent Routing**: A router model selects the most suitable plugin for each request.
 - **Multi-Provider LLM Support**:
+  - OpenAI
+  - Anthropic
+  - OpenRouter
+  - Moonshot
   - Gemini
   - DeepSeek
   - Groq
   - Baseten
   - Ollama (local)
+  - OpenAI-compatible endpoints
+  - Anthropic-compatible endpoints
 - **Provider + Model Fallback**:
   - Multiple providers can be configured and stored at the same time.
   - Providers can be configured but kept disabled at runtime.
