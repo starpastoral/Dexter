@@ -3755,11 +3755,18 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
         })
         .collect();
 
+    let provider_name_width = app
+        .providers
+        .iter()
+        .map(|provider| provider.name().chars().count() as u16)
+        .max()
+        .unwrap_or(10);
+
     let table_widths = if very_narrow {
         vec![
             Constraint::Length(2),
             Constraint::Length(7),
-            Constraint::Min(8),
+            Constraint::Min(provider_name_width.max(8)),
             Constraint::Length(8),
             Constraint::Length(6),
         ]
@@ -3767,7 +3774,7 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
         vec![
             Constraint::Length(2),
             Constraint::Length(8),
-            Constraint::Min(10),
+            Constraint::Min(provider_name_width.max(10)),
             Constraint::Length(10),
             Constraint::Length(8),
         ]
@@ -3775,7 +3782,7 @@ fn render_setup_provider_table(f: &mut Frame, app: &SetupApp, area: Rect) {
         vec![
             Constraint::Length(2),
             Constraint::Length(8),
-            Constraint::Length(12),
+            Constraint::Min(provider_name_width.max(12)),
             Constraint::Length(10),
             Constraint::Length(14),
         ]
