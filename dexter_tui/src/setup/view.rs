@@ -30,6 +30,9 @@ pub fn mask_api_key(raw: &str) -> String {
 }
 
 pub fn setup_ui(f: &mut Frame, app: &SetupApp) {
+    // Fill the full frame so theme background also applies to top/bottom gutters.
+    f.render_widget(Block::default().style(app.theme.base_style), f.area());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -47,7 +50,8 @@ pub fn setup_ui(f: &mut Frame, app: &SetupApp) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(app.theme.border_style),
-    );
+    )
+    .style(app.theme.base_style);
     f.render_widget(header, chunks[0]);
 
     if app.state == SetupState::ProviderSelection {
@@ -60,6 +64,10 @@ pub fn setup_ui(f: &mut Frame, app: &SetupApp) {
     }
     if app.state == SetupState::ModelOrderSelection {
         render_setup_model_order_table(f, app, chunks[1]);
+        return;
+    }
+    if app.state == SetupState::Confirm {
+        render_setup_confirm_table(f, app, chunks[1]);
         return;
     }
 
@@ -280,68 +288,25 @@ pub fn setup_ui(f: &mut Frame, app: &SetupApp) {
                 } else {
                     app.theme.header_subtitle_style
                 };
-                let prefix = if i == app.selected_theme_idx {
-                    "> "
+                let marker = if i == app.selected_theme_idx {
+                    "◆"
                 } else {
-                    "  "
+                    "◇"
                 };
                 lines.push(Line::from(Span::styled(
-                    format!("{}{}", prefix, display_name),
+                    format!("  {} {}", marker, display_name),
                     style,
                 )));
             }
 
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "(Use Arrow Keys to Select, ENTER to Confirm)",
+                "Use Arrow Keys to Select, ENTER to Confirm",
                 app.theme.header_subtitle_style,
             )));
             lines
         }
-        SetupState::Confirm => {
-            let primary = app
-                .model_order
-                .first()
-                .map(|r| model_route_display(r, &app.providers))
-                .unwrap_or_else(|| "Unknown".to_string());
-            let fallback = if app.model_order.len() > 1 {
-                app.model_order
-                    .iter()
-                    .skip(1)
-                    .map(|r| model_route_display(r, &app.providers))
-                    .collect::<Vec<_>>()
-                    .join(" -> ")
-            } else {
-                "None".to_string()
-            };
-
-            vec![
-                Line::from(Span::styled(
-                    "STEP 6: CONFIRM SETTINGS",
-                    app.theme.header_title_style,
-                )),
-                Line::from(""),
-                Line::from(format!(
-                    "Enabled Providers: {}",
-                    app.enabled_provider_names().join(", ")
-                )),
-                Line::from(format!(
-                    "Disabled Providers: {}",
-                    app.disabled_provider_names().join(", ")
-                )),
-                Line::from(format!("Primary Model: {}", primary)),
-                Line::from(format!("Fallback Order: {}", fallback)),
-                Line::from(format!(
-                    "Theme: {}",
-                    app.available_themes[app.selected_theme_idx].1
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Save and Apply? [Y/n]",
-                    app.theme.input_prompt_style,
-                )),
-            ]
-        }
+        SetupState::Confirm => vec![],
         SetupState::Saving => vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -754,4 +719,164 @@ fn render_setup_model_order_table(f: &mut Frame, app: &SetupApp, area: Rect) {
         .style(app.theme.header_subtitle_style)
         .wrap(Wrap { trim: true });
     f.render_widget(help, layout[3]);
+}
+
+fn render_setup_confirm_table(f: &mut Frame, app: &SetupApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style)
+        .title(" SETUP WIZARD ");
+    f.render_widget(&block, area);
+    let inner = block.inner(area);
+    let compact = inner.width < 108;
+    let very_narrow = inner.width < 86;
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if compact { 5 } else { 4 }),
+            Constraint::Length(1),
+            Constraint::Length(5),
+            Constraint::Length(if very_narrow { 8 } else { 5 }),
+            Constraint::Min(6),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    let intro = vec![
+        Line::from(Span::styled(
+            "STEP 6: CONFIRM SETTINGS",
+            app.theme.header_title_style,
+        )),
+        Line::from(""),
+        Line::from("Review the final setup before saving."),
+    ];
+    let intro_para = Paragraph::new(intro)
+        .style(app.theme.header_subtitle_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(intro_para, layout[0]);
+
+    let primary = app
+        .model_order
+        .first()
+        .map(|r| model_route_display(r, &app.providers))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let summary_header = Row::new(vec![Cell::from("FIELD"), Cell::from("VALUE")])
+        .style(app.theme.footer_text_style.add_modifier(Modifier::BOLD));
+    let summary_rows = vec![
+        Row::new(vec![
+            Cell::from("THEME"),
+            Cell::from(app.available_themes[app.selected_theme_idx].1),
+        ])
+        .style(app.theme.header_subtitle_style),
+        Row::new(vec![Cell::from("PRIMARY"), Cell::from(primary)])
+            .style(app.theme.header_subtitle_style),
+        Row::new(vec![
+            Cell::from("ROUTES"),
+            Cell::from(app.model_order.len().to_string()),
+        ])
+        .style(app.theme.header_subtitle_style),
+    ];
+    let summary_table = Table::new(summary_rows, [Constraint::Length(10), Constraint::Min(20)])
+        .header(summary_header)
+        .column_spacing(1)
+        .style(app.theme.base_style);
+    f.render_widget(summary_table, layout[2]);
+
+    let enabled = app.enabled_provider_names();
+    let mut enabled_lines = vec![Line::from(Span::styled(
+        "ENABLED PROVIDERS",
+        app.theme.footer_text_style.add_modifier(Modifier::BOLD),
+    ))];
+    if enabled.is_empty() {
+        enabled_lines.push(Line::from("  ◇ (NONE)"));
+    } else {
+        for name in enabled {
+            enabled_lines.push(Line::from(format!("  ◆ {}", name)));
+        }
+    }
+    let enabled_para = Paragraph::new(enabled_lines)
+        .style(app.theme.header_subtitle_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(enabled_para, layout[3]);
+
+    let fallback_header = Row::new(vec![
+        Cell::from("ROLE"),
+        Cell::from("MODEL"),
+        Cell::from(if very_narrow { "PROV" } else { "PROVIDER" }),
+    ])
+    .style(app.theme.footer_text_style.add_modifier(Modifier::BOLD));
+    let fallback_rows = if app.model_order.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("--"),
+            Cell::from("(none)"),
+            Cell::from("--"),
+        ])
+        .style(app.theme.header_subtitle_style)]
+    } else {
+        app.model_order
+            .iter()
+            .enumerate()
+            .map(|(idx, route)| {
+                let provider = app
+                    .providers
+                    .get(route.provider_idx)
+                    .map(|p| p.name().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let role = if idx == 0 {
+                    "PRIMARY".to_string()
+                } else {
+                    format!("F{}", idx)
+                };
+
+                Row::new(vec![
+                    Cell::from(role),
+                    Cell::from(route.model.clone()),
+                    Cell::from(provider),
+                ])
+                .style(if idx == 0 {
+                    app.theme.proposal_cmd_style
+                } else {
+                    app.theme.header_subtitle_style
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let fallback_widths = if very_narrow {
+        vec![
+            Constraint::Length(8),
+            Constraint::Min(10),
+            Constraint::Length(8),
+        ]
+    } else if compact {
+        vec![
+            Constraint::Length(8),
+            Constraint::Min(18),
+            Constraint::Length(12),
+        ]
+    } else {
+        vec![
+            Constraint::Length(8),
+            Constraint::Min(24),
+            Constraint::Length(16),
+        ]
+    };
+    let fallback_table = Table::new(fallback_rows, fallback_widths)
+        .header(fallback_header)
+        .column_spacing(1)
+        .style(app.theme.base_style);
+    f.render_widget(fallback_table, layout[4]);
+
+    let prompt = Paragraph::new(vec![
+        Line::from(Span::styled(
+            "Save and Apply? [Y/N]",
+            app.theme.input_prompt_style,
+        )),
+        Line::from(Span::styled(
+            "ENTER/Y: Save and apply   ESC/N: Back to Theme",
+            app.theme.header_subtitle_style,
+        )),
+    ])
+    .wrap(Wrap { trim: true });
+    f.render_widget(prompt, layout[5]);
 }

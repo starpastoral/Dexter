@@ -145,10 +145,10 @@ impl SetupApp {
             model_order: Vec::new(),
             model_order_cursor: 0,
             available_themes: vec![
-                ("auto", "🔄 Auto (Follow system appearance)"),
-                ("dark", "🌑 Dark (Blue on charcoal)"),
-                ("retro", "🌙 Retro (Classic amber CRT aesthetic)"),
-                ("light", "☀️ Light (Clean blue/white for light terminals)"),
+                ("auto", "Auto (Follow system appearance)"),
+                ("dark", "Dark (Blue on charcoal)"),
+                ("retro", "Retro (Classic amber CRT aesthetic)"),
+                ("light", "Light (Clean blue/white for light terminals)"),
             ],
             selected_theme_idx: 0,
             theme: Theme::from_config(&config.theme),
@@ -294,14 +294,6 @@ impl SetupApp {
         self.providers
             .iter()
             .filter(|p| p.enabled)
-            .map(|p| p.name().to_string())
-            .collect()
-    }
-
-    pub fn disabled_provider_names(&self) -> Vec<String> {
-        self.providers
-            .iter()
-            .filter(|p| !p.enabled)
             .map(|p| p.name().to_string())
             .collect()
     }
