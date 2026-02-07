@@ -4,8 +4,8 @@ use dexter_core::{
     SafetyGuard,
 };
 use dexter_plugins::{
-    F2Plugin, FFmpegPlugin, OcrmypdfPlugin, PandocPlugin, Plugin, PreviewContent, QpdfPlugin,
-    YtDlpPlugin,
+    F2Plugin, FFmpegPlugin, JdupesPlugin, LibvipsPlugin, OcrmypdfPlugin, PandocPlugin, Plugin,
+    PreviewContent, QpdfPlugin, WhisperCppPlugin, YtDlpPlugin,
 };
 use ratatui::layout::Rect;
 use std::sync::Arc;
@@ -139,6 +139,9 @@ impl App {
                 Arc::new(QpdfPlugin) as Arc<dyn Plugin>,
                 Arc::new(OcrmypdfPlugin) as Arc<dyn Plugin>,
                 Arc::new(YtDlpPlugin) as Arc<dyn Plugin>,
+                Arc::new(WhisperCppPlugin) as Arc<dyn Plugin>,
+                Arc::new(JdupesPlugin) as Arc<dyn Plugin>,
+                Arc::new(LibvipsPlugin) as Arc<dyn Plugin>,
             ],
             selected_plugin: None,
             generated_command: None,

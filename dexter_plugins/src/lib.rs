@@ -1,16 +1,22 @@
 pub mod command_exec;
 pub mod f2;
 pub mod ffmpeg;
+pub mod jdupes;
+pub mod libvips;
 pub mod ocrmypdf;
 pub mod pandoc;
 pub mod qpdf;
+pub mod whispercpp;
 pub mod ytdlp;
 
 pub use f2::F2Plugin;
 pub use ffmpeg::FFmpegPlugin;
+pub use jdupes::JdupesPlugin;
+pub use libvips::LibvipsPlugin;
 pub use ocrmypdf::OcrmypdfPlugin;
 pub use pandoc::PandocPlugin;
 pub use qpdf::QpdfPlugin;
+pub use whispercpp::WhisperCppPlugin;
 pub use ytdlp::YtDlpPlugin;
 
 use anyhow::Result;
