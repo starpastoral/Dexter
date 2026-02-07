@@ -7,6 +7,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 const DEFAULT_CACHE_CAPACITY: usize = 512;
+const ROUTER_TEMPERATURE: f32 = 0.0;
+const EXECUTOR_TEMPERATURE: f32 = 0.1;
+const ROUTER_MAX_TOKENS: u32 = 512;
+const EXECUTOR_MAX_TOKENS: u32 = 1200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePolicy {
@@ -32,18 +36,26 @@ struct LlmTarget {
     model: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
+struct CompletionParams {
+    temperature: f32,
+    max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
     #[serde(default)]
     content: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,8 +285,13 @@ fn build_targets_from_legacy_models(
 
 impl LlmClient {
     pub async fn completion(&self, system_prompt: &str, user_input: &str) -> Result<String> {
-        self.completion_with_policy(system_prompt, user_input, CachePolicy::Normal)
-            .await
+        self.completion_with_policy_and_params(
+            system_prompt,
+            user_input,
+            CachePolicy::Normal,
+            router_completion_params(),
+        )
+        .await
     }
 
     pub async fn completion_with_policy(
@@ -283,10 +300,32 @@ impl LlmClient {
         user_input: &str,
         cache_policy: CachePolicy,
     ) -> Result<String> {
+        self.completion_with_policy_and_params(
+            system_prompt,
+            user_input,
+            cache_policy,
+            executor_completion_params(),
+        )
+        .await
+    }
+
+    async fn completion_with_policy_and_params(
+        &self,
+        system_prompt: &str,
+        user_input: &str,
+        cache_policy: CachePolicy,
+        params: CompletionParams,
+    ) -> Result<String> {
         let mut errors = Vec::new();
         for target in &self.targets {
             match self
-                .execute_completion_for_target(target, system_prompt, user_input, cache_policy)
+                .execute_completion_for_target(
+                    target,
+                    system_prompt,
+                    user_input,
+                    cache_policy,
+                    params,
+                )
                 .await
             {
                 Ok(content) => return Ok(content),
@@ -309,6 +348,7 @@ impl LlmClient {
         system_prompt: &str,
         user_input: &str,
         cache_policy: CachePolicy,
+        params: CompletionParams,
     ) -> Result<String> {
         if is_anthropic_target(target) {
             self.execute_anthropic_completion_for_target(
@@ -316,6 +356,7 @@ impl LlmClient {
                 system_prompt,
                 user_input,
                 cache_policy,
+                params,
             )
             .await
         } else {
@@ -324,6 +365,7 @@ impl LlmClient {
                 system_prompt,
                 user_input,
                 cache_policy,
+                params,
             )
             .await
         }
@@ -335,10 +377,12 @@ impl LlmClient {
         system_prompt: &str,
         user_input: &str,
         cache_policy: CachePolicy,
+        params: CompletionParams,
     ) -> Result<String> {
         let url = format!("{}/chat/completions", target.base_url.trim_end_matches('/'));
         let messages = build_openai_messages(target, system_prompt, user_input);
-        let cache_key = self.build_cache_key(target, &messages, 0.1)?;
+        let cache_key =
+            self.build_cache_key(target, &messages, params.temperature, params.max_tokens)?;
 
         if cache_policy == CachePolicy::Normal {
             if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
@@ -346,10 +390,11 @@ impl LlmClient {
             }
         }
 
-        let request_body = ChatRequest {
+        let mut request_body = ChatRequest {
             model: target.model.clone(),
             messages,
-            temperature: 0.1,
+            temperature: params.temperature,
+            max_tokens: params.max_tokens,
         };
 
         let mut request = self
@@ -359,8 +404,23 @@ impl LlmClient {
         request = apply_auth_header(request, target)?;
         let response = request.json(&request_body).send().await?;
 
-        let status = response.status();
-        let text = response.text().await?;
+        let mut status = response.status();
+        let mut text = response.text().await?;
+
+        if !status.is_success()
+            && request_body.max_tokens.is_some()
+            && likely_rejects_max_tokens(status.as_u16(), &text)
+        {
+            request_body.max_tokens = None;
+            let mut retry = self
+                .http_client
+                .post(&url)
+                .header("Content-Type", "application/json");
+            retry = apply_auth_header(retry, target)?;
+            let retry_response = retry.json(&request_body).send().await?;
+            status = retry_response.status();
+            text = retry_response.text().await?;
+        }
 
         if !status.is_success() {
             let lower = text.to_lowercase();
@@ -440,10 +500,17 @@ impl LlmClient {
         system_prompt: &str,
         user_input: &str,
         cache_policy: CachePolicy,
+        params: CompletionParams,
     ) -> Result<String> {
         let url = format!("{}/messages", target.base_url.trim_end_matches('/'));
-        let cache_key =
-            self.build_anthropic_cache_key(target, system_prompt, user_input, 0.1, 4096)?;
+        let max_tokens = params.max_tokens.unwrap_or(EXECUTOR_MAX_TOKENS);
+        let cache_key = self.build_anthropic_cache_key(
+            target,
+            system_prompt,
+            user_input,
+            params.temperature,
+            max_tokens,
+        )?;
 
         if cache_policy == CachePolicy::Normal {
             if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
@@ -458,8 +525,8 @@ impl LlmClient {
                 content: user_input.to_string(),
             }],
             system: system_prompt.to_string(),
-            temperature: 0.1,
-            max_tokens: 4096,
+            temperature: params.temperature,
+            max_tokens,
         };
 
         let mut request = self
@@ -551,12 +618,18 @@ impl LlmClient {
         target: &LlmTarget,
         messages: &[ChatMessage],
         temperature: f32,
+        max_tokens: Option<u32>,
     ) -> Result<String> {
-        let payload = serde_json::to_string(messages)
+        let payload = serde_json::json!({
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        });
+        let payload = serde_json::to_string(&payload)
             .map_err(|e| anyhow!("Failed to serialize messages for cache key: {}", e))?;
         Ok(format!(
-            "{}|{}|{}|{:.3}|{}",
-            target.provider_name, target.base_url, target.model, temperature, payload
+            "{}|{}|{}|{}",
+            target.provider_name, target.base_url, target.model, payload
         ))
     }
 
@@ -719,6 +792,31 @@ fn parse_model_list(text: &str) -> Result<Vec<String>> {
     Ok(model_names)
 }
 
+fn router_completion_params() -> CompletionParams {
+    CompletionParams {
+        temperature: ROUTER_TEMPERATURE,
+        max_tokens: Some(ROUTER_MAX_TOKENS),
+    }
+}
+
+fn executor_completion_params() -> CompletionParams {
+    CompletionParams {
+        temperature: EXECUTOR_TEMPERATURE,
+        max_tokens: Some(EXECUTOR_MAX_TOKENS),
+    }
+}
+
+fn likely_rejects_max_tokens(status_code: u16, body: &str) -> bool {
+    if status_code != 400 {
+        return false;
+    }
+    let lower = body.to_lowercase();
+    lower.contains("max_tokens")
+        || lower.contains("max completion tokens")
+        || lower.contains("unknown field")
+        || lower.contains("unrecognized field")
+}
+
 fn build_openai_messages(
     target: &LlmTarget,
     system_prompt: &str,
@@ -861,6 +959,7 @@ fn clean_optional(input: String) -> Option<String> {
 #[async_trait::async_trait]
 impl dexter_plugins::LlmBridge for LlmClient {
     async fn chat(&self, system: &str, user: &str) -> Result<String> {
-        self.completion(system, user).await
+        self.completion_with_policy(system, user, CachePolicy::Normal)
+            .await
     }
 }
