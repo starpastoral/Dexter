@@ -33,7 +33,10 @@ pub async fn run_setup_flow(
     app.refresh_runtime_statuses().await;
 
     loop {
-        terminal.draw(|f| setup_ui(f, &app))?;
+        if app.dirty {
+            terminal.draw(|f| setup_ui(f, &app))?;
+            app.dirty = false;
+        }
 
         if app.state == SetupState::FetchingProviderModels {
             if let Err(e) = app.fetch_models_for_current_provider().await {
@@ -41,12 +44,15 @@ pub async fn run_setup_flow(
             } else {
                 app.state = SetupState::ProviderModelSelection;
             }
+            app.dirty = true;
             continue;
         }
 
-        if event::poll(Duration::from_millis(80))? {
+        let poll_ms = 220;
+        if event::poll(Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
+                    app.dirty = true;
                     match app.state {
                         SetupState::Welcome => match key.code {
                             KeyCode::Enter => app.state = SetupState::ProviderSelection,
@@ -80,6 +86,7 @@ pub async fn run_setup_flow(
                         SetupState::ProviderConfig => {
                             let Some(provider_idx) = app.config_provider_idx else {
                                 app.state = SetupState::ProviderSelection;
+                                app.dirty = true;
                                 continue;
                             };
                             let requires_key = app.providers[provider_idx].requires_api_key();
@@ -117,6 +124,7 @@ pub async fn run_setup_flow(
                         SetupState::ProviderModelSelection => {
                             let Some(provider_idx) = app.config_provider_idx else {
                                 app.state = SetupState::ProviderSelection;
+                                app.dirty = true;
                                 continue;
                             };
                             let model_count = app.providers[provider_idx].available_models.len();
@@ -197,6 +205,7 @@ pub async fn run_setup_flow(
                         SetupState::Confirm => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => {
                                 app.state = SetupState::on_confirm_enter();
+                                app.dirty = true;
                                 app.save_config().await?;
                                 return Ok(app.config);
                             }

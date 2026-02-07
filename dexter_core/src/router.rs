@@ -196,8 +196,8 @@ fn parse_router_response(response: &str) -> Result<RouterResponse> {
     }
 
     Err(anyhow!(
-        "Failed to parse Router JSON from model response. Raw response: {}",
-        response
+        "Failed to parse Router JSON from model response. Raw response snippet: {}",
+        truncate_router_error(response)
     ))
 }
 
@@ -247,6 +247,15 @@ fn extract_first_json_object(input: &str) -> Option<String> {
     }
 
     None
+}
+
+fn truncate_router_error(text: &str) -> String {
+    const MAX: usize = 320;
+    if text.len() > MAX {
+        format!("{}...", &text[..MAX])
+    } else {
+        text.to_string()
+    }
 }
 
 fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
@@ -458,5 +467,13 @@ mod tests {
 Thanks!"#;
         let parsed = parse_router_response(raw).expect("should parse");
         assert_eq!(parsed.plugin_name.as_deref(), Some("f2"));
+    }
+
+    #[test]
+    fn truncate_router_error_limits_output_size() {
+        let long = "x".repeat(500);
+        let truncated = truncate_router_error(&long);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 323);
     }
 }

@@ -112,6 +112,7 @@ pub struct SetupApp {
     pub selected_theme_idx: usize,
     pub config: Config,
     pub theme: Theme,
+    pub dirty: bool,
 }
 
 impl SetupApp {
@@ -152,6 +153,7 @@ impl SetupApp {
             selected_theme_idx: 0,
             theme: Theme::from_config(&config.theme),
             config,
+            dirty: true,
         };
 
         if let Some(idx) = app

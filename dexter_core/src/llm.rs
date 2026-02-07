@@ -450,9 +450,9 @@ impl LlmClient {
 
         let chat_response: ChatResponse = serde_json::from_str(&text).map_err(|e| {
             anyhow!(
-                "Failed to parse LLM response: {} | Raw response: {}",
+                "Failed to parse LLM response: {} | Raw response snippet: {}",
                 e,
-                text
+                truncate_error(&text)
             )
         })?;
 
@@ -567,9 +567,9 @@ impl LlmClient {
 
         let parsed: AnthropicResponse = serde_json::from_str(&text).map_err(|e| {
             anyhow!(
-                "Failed to parse LLM response: {} | Raw response: {}",
+                "Failed to parse LLM response: {} | Raw response snippet: {}",
                 e,
-                text
+                truncate_error(&text)
             )
         })?;
 
@@ -764,8 +764,13 @@ impl LlmClient {
 }
 
 fn parse_model_list(text: &str) -> Result<Vec<String>> {
-    let list_data: ModelListData = serde_json::from_str(text)
-        .map_err(|e| anyhow!("Failed to parse model list: {} | Raw response: {}", e, text))?;
+    let list_data: ModelListData = serde_json::from_str(text).map_err(|e| {
+        anyhow!(
+            "Failed to parse model list: {} | Raw response snippet: {}",
+            e,
+            truncate_error(text)
+        )
+    })?;
 
     let mut model_names = Vec::new();
 
