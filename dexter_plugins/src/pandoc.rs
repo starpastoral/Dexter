@@ -1,3 +1,4 @@
+use crate::command_exec::parse_and_validate_command;
 use crate::{LlmBridge, Plugin, PreviewContent, Progress};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -39,10 +40,11 @@ fn extract_output_path(cmd: &str) -> Option<String> {
 }
 
 fn validate_pandoc_command(cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    if !trimmed.starts_with("pandoc ") {
+    if parse_and_validate_command(cmd, "pandoc").is_err() {
         return false;
     }
+
+    let trimmed = cmd.trim();
 
     let banned_tokens = ["&&", "||", ";", "|", "`", "$(", ">", "<"];
     if banned_tokens.iter().any(|t| trimmed.contains(t)) {
@@ -179,17 +181,11 @@ Your goal is to generate a valid `pandoc` command.
             })
             .await;
 
-        let output = if cfg!(target_os = "windows") {
-            tokio::process::Command::new("cmd")
-                .args(["/C", cmd])
-                .output()
-                .await?
-        } else {
-            tokio::process::Command::new("sh")
-                .args(["-c", cmd])
-                .output()
-                .await?
-        };
+        let argv = parse_and_validate_command(cmd, "pandoc")?;
+        let output = tokio::process::Command::new(&argv[0])
+            .args(argv.iter().skip(1))
+            .output()
+            .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

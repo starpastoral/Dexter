@@ -1,8 +1,9 @@
+use crate::command_exec::{contains_arg, parse_and_validate_command};
 use crate::{Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
 use regex::Regex;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 
@@ -88,10 +89,11 @@ Your goal is to generate a valid `yt-dlp` command.
     }
 
     fn validate_command(&self, cmd: &str) -> bool {
-        let trimmed = cmd.trim();
-        if !trimmed.starts_with("yt-dlp ") {
+        if parse_and_validate_command(cmd, "yt-dlp").is_err() {
             return false;
         }
+
+        let trimmed = cmd.trim();
 
         if trimmed.contains("--exec") {
             return false;
@@ -132,24 +134,17 @@ Your goal is to generate a valid `yt-dlp` command.
         cmd: &str,
         progress_tx: tokio::sync::mpsc::Sender<crate::Progress>,
     ) -> Result<String> {
-        let mut final_cmd = cmd.to_string();
-        if !final_cmd.contains(" --newline") {
-            final_cmd.push_str(" --newline");
+        let mut argv = parse_and_validate_command(cmd, "yt-dlp")?;
+        if !contains_arg(&argv, "--newline") {
+            argv.push("--newline".to_string());
         }
 
-        let mut child = if cfg!(target_os = "windows") {
-            tokio::process::Command::new("cmd")
-                .args(["/C", &final_cmd])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?
-        } else {
-            tokio::process::Command::new("sh")
-                .args(["-c", &final_cmd])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?
-        };
+        let mut command = tokio::process::Command::new(&argv[0]);
+        command
+            .args(argv.iter().skip(1))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
 
         let stderr = child
             .stderr
@@ -216,5 +211,22 @@ Your goal is to generate a valid `yt-dlp` command.
         } else {
             Err(anyhow::anyhow!(format!("yt-dlp error:\n{}", err_output)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_shell_injection() {
+        let plugin = YtDlpPlugin;
+        assert!(!plugin.validate_command("yt-dlp \"url\" && echo x"));
+    }
+
+    #[test]
+    fn validate_allows_quoted_url() {
+        let plugin = YtDlpPlugin;
+        assert!(plugin.validate_command("yt-dlp \"https://example.com/watch?v=a&b=1\""));
     }
 }

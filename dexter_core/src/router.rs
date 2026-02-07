@@ -143,18 +143,7 @@ Rules:
             )
             .await?;
 
-        // Parse JSON from response (naive parsing, ensuring json block extraction might be needed in prod)
-        // For now assuming LLM follows instruction purely or we use a strict parser later.
-        // We might need to strip markdown code blocks ```json ... ```
-        let clean_json = response
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-
-        let router_resp: RouterResponse = serde_json::from_str(clean_json)
-            .map_err(|e| anyhow!("Failed to parse Router JSON: {}. Response: {}", e, response))?;
+        let router_resp: RouterResponse = parse_router_response(&response)?;
 
         if let Some(clarify) = router_resp.clarify {
             if let Some(outcome) = validate_llm_clarify(clarify) {
@@ -186,6 +175,78 @@ Rules:
             reasoning,
         })
     }
+}
+
+fn parse_router_response(response: &str) -> Result<RouterResponse> {
+    let clean_json = response
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    if let Ok(parsed) = serde_json::from_str::<RouterResponse>(clean_json) {
+        return Ok(parsed);
+    }
+
+    if let Some(candidate) = extract_first_json_object(response) {
+        if let Ok(parsed) = serde_json::from_str::<RouterResponse>(&candidate) {
+            return Ok(parsed);
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to parse Router JSON from model response. Raw response: {}",
+        response
+    ))
+}
+
+fn extract_first_json_object(input: &str) -> Option<String> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = start {
+                        return Some(input[s..=idx].to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
@@ -375,4 +436,27 @@ fn doc_extensions() -> HashSet<&'static str> {
 
 fn image_extensions() -> HashSet<&'static str> {
     ["png", "jpg", "jpeg", "gif", "webp"].into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_router_response_accepts_markdown_wrapped_json() {
+        let raw = r#"```json
+{"plugin_name":"ffmpeg","confidence":0.92,"reasoning":"media task"}
+```"#;
+        let parsed = parse_router_response(raw).expect("should parse");
+        assert_eq!(parsed.plugin_name.as_deref(), Some("ffmpeg"));
+    }
+
+    #[test]
+    fn parse_router_response_extracts_json_from_noise() {
+        let raw = r#"I think this is correct:
+{"plugin_name":"f2","confidence":0.91,"reasoning":"rename task"}
+Thanks!"#;
+        let parsed = parse_router_response(raw).expect("should parse");
+        assert_eq!(parsed.plugin_name.as_deref(), Some("f2"));
+    }
 }

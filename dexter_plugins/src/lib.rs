@@ -1,3 +1,4 @@
+pub mod command_exec;
 pub mod f2;
 pub mod ffmpeg;
 pub mod pandoc;

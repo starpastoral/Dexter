@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -18,21 +19,11 @@ fn default_theme() -> String {
     "auto".to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ApiKeys {
     pub gemini: Option<String>,
     pub deepseek: Option<String>,
     pub base_url: Option<String>, // Override for OpenAI-compatible endpoints
-}
-
-impl Default for ApiKeys {
-    fn default() -> Self {
-        Self {
-            gemini: None,
-            deepseek: None,
-            base_url: None,
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -322,7 +313,27 @@ impl Config {
         let config_path = config_dir.join("config.toml");
         let content = toml::to_string_pretty(self)?;
 
-        fs::write(config_path, content).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&config_path)
+                .await?;
+            file.write_all(content.as_bytes()).await?;
+            file.flush().await?;
+            fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).await?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(&config_path, content).await?;
+        }
+
         Ok(())
     }
 

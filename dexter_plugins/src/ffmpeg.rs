@@ -1,7 +1,8 @@
+use crate::command_exec::parse_and_validate_command;
 use crate::{Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tokio::io::AsyncBufReadExt;
 
 pub struct FFmpegPlugin;
@@ -85,7 +86,7 @@ Your goal is to generate a valid `ffmpeg` command.
     }
 
     fn validate_command(&self, cmd: &str) -> bool {
-        cmd.starts_with("ffmpeg ")
+        parse_and_validate_command(cmd, "ffmpeg").is_ok()
     }
 
     async fn dry_run(
@@ -115,19 +116,14 @@ Your goal is to generate a valid `ffmpeg` command.
         cmd: &str,
         progress_tx: tokio::sync::mpsc::Sender<crate::Progress>,
     ) -> Result<String> {
-        let mut child = if cfg!(target_os = "windows") {
-            tokio::process::Command::new("cmd")
-                .args(["/C", cmd])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?
-        } else {
-            tokio::process::Command::new("sh")
-                .args(["-c", cmd])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?
-        };
+        let argv = parse_and_validate_command(cmd, "ffmpeg")?;
+        let mut command = tokio::process::Command::new(&argv[0]);
+        command
+            .args(argv.iter().skip(1))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = command.spawn()?;
 
         // FFmpeg writes progress to stderr
         let stderr = child
@@ -196,5 +192,22 @@ Your goal is to generate a valid `ffmpeg` command.
         } else {
             Err(anyhow::anyhow!(err_output))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_shell_injection() {
+        let plugin = FFmpegPlugin;
+        assert!(!plugin.validate_command("ffmpeg -i a.mp4 b.mp4; rm -rf /"));
+    }
+
+    #[test]
+    fn validate_allows_quoted_paths() {
+        let plugin = FFmpegPlugin;
+        assert!(plugin.validate_command("ffmpeg -i \"in file.mp4\" \"out file.mp4\""));
     }
 }

@@ -1,3 +1,4 @@
+use crate::command_exec::{contains_arg, parse_and_validate_command, spawn_checked};
 use crate::{DiffItem, Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -96,7 +97,7 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
     }
 
     fn validate_command(&self, cmd: &str) -> bool {
-        cmd.starts_with("f2 ")
+        parse_and_validate_command(cmd, "f2").is_ok()
     }
 
     async fn dry_run(
@@ -104,29 +105,9 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
         cmd: &str,
         _llm: Option<&dyn crate::LlmBridge>,
     ) -> Result<PreviewContent> {
-        // Ensure no-color and strip -x/-X
-        let mut safe_cmd = cmd.replace(" -x", "").replace(" -X", "");
-
-        if !safe_cmd.contains(" --no-color") {
-            safe_cmd.push_str(" --no-color");
-        }
-
-        let final_cmd = safe_cmd;
-
-        let mut cmd_obj = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.env("LC_ALL", "C");
-            c.args(["/C", &final_cmd]);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.env("LC_ALL", "C");
-            c.args(["-c", &final_cmd]);
-            c
-        };
-
+        let argv = build_f2_argv(cmd, false)?;
         let cwd = std::env::current_dir()?;
-        let output = cmd_obj.current_dir(cwd).output()?;
+        let output = spawn_checked(&argv, cwd)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -209,25 +190,9 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
     }
 
     async fn execute(&self, cmd: &str) -> Result<String> {
-        let mut final_cmd = cmd.to_string();
-        if !final_cmd.contains(" --no-color") {
-            final_cmd.push_str(" --no-color");
-        }
-
-        let mut cmd_obj = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.env("LC_ALL", "C");
-            c.args(["/C", &final_cmd]);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.env("LC_ALL", "C");
-            c.args(["-c", &final_cmd]);
-            c
-        };
-
+        let argv = build_f2_argv(cmd, true)?;
         let cwd = std::env::current_dir()?;
-        let output = cmd_obj.current_dir(cwd).output()?;
+        let output = spawn_checked(&argv, cwd)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -239,4 +204,18 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
             Err(anyhow::anyhow!("f2 error: {}\n{}", stdout, stderr))
         }
     }
+}
+
+fn build_f2_argv(cmd: &str, execute_mode: bool) -> Result<Vec<String>> {
+    let mut argv = parse_and_validate_command(cmd, "f2")?;
+    argv.retain(|a| a != "-x" && a != "-X");
+
+    if execute_mode && !contains_arg(&argv, "-x") && !contains_arg(&argv, "-X") {
+        argv.push("-x".to_string());
+    }
+    if !contains_arg(&argv, "--no-color") {
+        argv.push("--no-color".to_string());
+    }
+
+    Ok(argv)
 }

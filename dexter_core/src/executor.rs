@@ -4,7 +4,9 @@ use crate::safety::SafetyGuard;
 use crate::CachePolicy;
 use anyhow::{Context, Result};
 use dexter_plugins::Plugin;
+use regex::Regex;
 use serde_json::json;
+use std::sync::OnceLock;
 use tokio::fs::{create_dir_all, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
@@ -92,10 +94,11 @@ impl Executor {
         }
 
         let history_path = history_dir.join("history.jsonl");
+        let redacted_command = redact_sensitive(command);
         let entry = json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "plugin": plugin_name,
-            "command": command,
+            "command": redacted_command,
         });
 
         let mut file = OpenOptions::new()
@@ -106,5 +109,41 @@ impl Executor {
 
         file.write_all(format!("{}\n", entry).as_bytes()).await?;
         Ok(())
+    }
+}
+
+fn redact_sensitive(command: &str) -> String {
+    static COOKIES_RE: OnceLock<Regex> = OnceLock::new();
+    static AUTH_RE: OnceLock<Regex> = OnceLock::new();
+    static QUERY_TOKEN_RE: OnceLock<Regex> = OnceLock::new();
+
+    let cookies_re = COOKIES_RE
+        .get_or_init(|| Regex::new(r#"(?i)(--cookies(?:=|\s+))("[^"]*"|'[^']*'|\S+)"#).unwrap());
+    let auth_re = AUTH_RE.get_or_init(|| {
+        Regex::new(r#"(?i)(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]+)"#).unwrap()
+    });
+    let query_token_re = QUERY_TOKEN_RE.get_or_init(|| {
+        Regex::new(r#"(?i)([?&](?:token|access_token|api_key|apikey|key)=)([^&\s"']+)"#).unwrap()
+    });
+
+    let step1 = cookies_re.replace_all(command, "$1[REDACTED]").to_string();
+    let step2 = auth_re.replace_all(&step1, "$1[REDACTED]").to_string();
+    query_token_re
+        .replace_all(&step2, "$1[REDACTED]")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_masks_cookies_and_tokens() {
+        let input = r#"yt-dlp --cookies cookies.txt "https://a.com/v?id=1&token=abc123""#;
+        let redacted = redact_sensitive(input);
+        assert!(!redacted.contains("cookies.txt"));
+        assert!(!redacted.contains("abc123"));
+        assert!(redacted.contains("--cookies [REDACTED]"));
+        assert!(redacted.contains("token=[REDACTED]"));
     }
 }

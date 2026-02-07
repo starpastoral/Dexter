@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 const DEFAULT_CACHE_CAPACITY: usize = 512;
@@ -11,6 +12,8 @@ const ROUTER_TEMPERATURE: f32 = 0.0;
 const EXECUTOR_TEMPERATURE: f32 = 0.1;
 const ROUTER_MAX_TOKENS: u32 = 512;
 const EXECUTOR_MAX_TOKENS: u32 = 1200;
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 8;
+const HTTP_REQUEST_TIMEOUT_SECS: u64 = 45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePolicy {
@@ -139,7 +142,7 @@ impl LlmClient {
         };
 
         Self {
-            http_client: Client::new(),
+            http_client: build_http_client(),
             targets: vec![LlmTarget {
                 provider_name: kind.display_name().to_string(),
                 kind,
@@ -226,7 +229,7 @@ impl LlmClient {
         }
 
         Self {
-            http_client: Client::new(),
+            http_client: build_http_client(),
             targets,
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_capacity: DEFAULT_CACHE_CAPACITY,
@@ -945,6 +948,14 @@ fn truncate_error(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn build_http_client() -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| Client::new())
 }
 
 fn clean_optional(input: String) -> Option<String> {
