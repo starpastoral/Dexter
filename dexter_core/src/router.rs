@@ -90,8 +90,16 @@ impl Router {
 
         let context_str = if let Some(summary) = &context.summary {
             summary.clone()
+        } else if context.files.is_empty() {
+            "(no visible files in current directory)".to_string()
         } else {
-            context.files.join(", ")
+            context
+                .files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| format!("{}. {}", i + 1, f))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
 
         let system_prompt = format!(
@@ -129,6 +137,8 @@ Rules:
 - If no plugin fits, set plugin_name to "none" and confidence to 0.0.
 - Only include "clarify" when multiple plausible interpretations exist.
 - If you include "clarify", set plugin_name to "none".
+- Every clarify option must be a single operation only.
+- Do NOT propose multi-step or chained operations inside one clarify option.
 "#,
             user_input,
             plugin_list.join("\n"),
@@ -260,6 +270,26 @@ fn truncate_router_error(text: &str) -> String {
 
 fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
     let lower = user_input.to_lowercase();
+    let operation_intents = detect_operation_intents(&lower);
+
+    // Guardrail: if user asks for chained mixed workflows, force single-operation clarify.
+    if operation_intents.len() >= 2 && has_step_connector(&lower) {
+        let options: Vec<ClarifyOption> = operation_intents
+            .iter()
+            .take(4)
+            .map(|intent| clarify_option_for_intent(*intent))
+            .collect();
+
+        if options.len() >= 2 {
+            return Some(RouteOutcome::Clarify {
+                question:
+                    "This request mixes multiple operations. Which single operation should Dexter run first?"
+                        .to_string(),
+                options,
+                source: ClarifySource::Rule,
+            });
+        }
+    }
 
     let exts = extract_extensions_in_order(&lower);
     let (has_media, has_doc) = classify_exts(&exts);
@@ -348,6 +378,9 @@ fn validate_llm_clarify(clarify: RouterClarify) -> Option<RouteOutcome> {
         if has_forbidden_chars(&opt.resolved_intent) {
             return None;
         }
+        if looks_mixed_operation_intent(&opt.resolved_intent) {
+            continue;
+        }
         let id = opt.id.unwrap_or_else(|| format!("option_{}", i + 1));
         options.push(ClarifyOption {
             id,
@@ -355,6 +388,10 @@ fn validate_llm_clarify(clarify: RouterClarify) -> Option<RouteOutcome> {
             detail: opt.detail,
             resolved_intent: opt.resolved_intent,
         });
+    }
+
+    if options.len() < 2 {
+        return None;
     }
 
     Some(RouteOutcome::Clarify {
@@ -371,6 +408,178 @@ fn has_forbidden_chars(value: &str) -> bool {
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| haystack.contains(n))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OperationIntent {
+    Rename,
+    Ocr,
+    Compress,
+    Convert,
+    ExtractAudio,
+    Dedupe,
+}
+
+fn detect_operation_intents(lower: &str) -> Vec<OperationIntent> {
+    let mut intents = Vec::new();
+
+    if contains_any(
+        lower,
+        &[
+            "rename",
+            "renaming",
+            "change extension",
+            "rename to",
+            "rename as",
+            "改名",
+            "重命名",
+            "后缀",
+        ],
+    ) {
+        intents.push(OperationIntent::Rename);
+    }
+    if contains_any(
+        lower,
+        &[
+            "ocr",
+            "文字识别",
+            "识别文字",
+            "扫描文字",
+            "扫描识别",
+            "可搜索",
+        ],
+    ) {
+        intents.push(OperationIntent::Ocr);
+    }
+    if contains_any(lower, &["compress", "compression", "压缩", "减小体积"]) {
+        intents.push(OperationIntent::Compress);
+    }
+    if contains_any(
+        lower,
+        &[
+            "extract audio",
+            "audio extract",
+            "提取音频",
+            "抽取音频",
+            "音频提取",
+        ],
+    ) {
+        intents.push(OperationIntent::ExtractAudio);
+    }
+    if contains_any(
+        lower,
+        &["convert", "conversion", "transcode", "转成", "转换"],
+    ) {
+        intents.push(OperationIntent::Convert);
+    }
+    if contains_any(
+        lower,
+        &[
+            "duplicate",
+            "duplicates",
+            "dedupe",
+            "jdupes",
+            "去重",
+            "重复文件",
+        ],
+    ) {
+        intents.push(OperationIntent::Dedupe);
+    }
+
+    intents
+}
+
+fn has_step_connector(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            " then ",
+            " and then ",
+            " first ",
+            " next ",
+            " finally ",
+            " followed by ",
+            "后再",
+            "然后",
+            "接着",
+            "最后",
+            "并且",
+            "并 ",
+            "再",
+            "先",
+        ],
+    )
+}
+
+fn clarify_option_for_intent(intent: OperationIntent) -> ClarifyOption {
+    match intent {
+        OperationIntent::Rename => ClarifyOption {
+            id: "rename_only".to_string(),
+            label: "Rename files".to_string(),
+            detail: "Only rename filenames/patterns.".to_string(),
+            resolved_intent:
+                "Rename files only (no OCR, conversion, compression, or duplicate scan)."
+                    .to_string(),
+        },
+        OperationIntent::Ocr => ClarifyOption {
+            id: "ocr_only".to_string(),
+            label: "OCR PDFs".to_string(),
+            detail: "Only run OCR on PDF files.".to_string(),
+            resolved_intent:
+                "Run OCR on PDF files only (no compression, renaming, or other steps).".to_string(),
+        },
+        OperationIntent::Compress => ClarifyOption {
+            id: "compress_only".to_string(),
+            label: "Compress files".to_string(),
+            detail: "Only compress files/media.".to_string(),
+            resolved_intent:
+                "Compress files only (no OCR, renaming, format conversion, or duplicate scan)."
+                    .to_string(),
+        },
+        OperationIntent::Convert => ClarifyOption {
+            id: "convert_only".to_string(),
+            label: "Convert format".to_string(),
+            detail: "Only convert file format.".to_string(),
+            resolved_intent:
+                "Convert file format only (no renaming, OCR, compression, or duplicate scan)."
+                    .to_string(),
+        },
+        OperationIntent::ExtractAudio => ClarifyOption {
+            id: "extract_audio".to_string(),
+            label: "Extract audio".to_string(),
+            detail: "Only extract audio from media.".to_string(),
+            resolved_intent:
+                "Extract audio only (no renaming, OCR, compression, or duplicate scan).".to_string(),
+        },
+        OperationIntent::Dedupe => ClarifyOption {
+            id: "dedupe_only".to_string(),
+            label: "Check duplicates".to_string(),
+            detail: "Only scan duplicate files.".to_string(),
+            resolved_intent:
+                "Scan duplicate files only (no renaming, OCR, compression, or conversion)."
+                    .to_string(),
+        },
+    }
+}
+
+fn looks_mixed_operation_intent(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "separate step",
+            "separate operation",
+            "break down",
+            "one step at a time",
+            "分步",
+            "逐步",
+            "分别",
+        ],
+    ) {
+        return false;
+    }
+
+    detect_operation_intents(&lower).len() >= 2 && has_step_connector(&lower)
 }
 
 fn extract_extensions_in_order(input: &str) -> Vec<String> {
@@ -475,5 +684,60 @@ Thanks!"#;
         let truncated = truncate_router_error(&long);
         assert!(truncated.ends_with("..."));
         assert!(truncated.len() <= 323);
+    }
+
+    #[test]
+    fn rule_precheck_mixed_workflow_yields_single_operation_clarify() {
+        let input = "把 PDF 做 OCR 后再压缩，并把结果重命名加日期后缀";
+        let outcome = rule_precheck(input).expect("should trigger clarify");
+        match outcome {
+            RouteOutcome::Clarify {
+                source, options, ..
+            } => {
+                assert!(matches!(source, ClarifySource::Rule));
+                assert!(options.len() >= 2);
+                for opt in options {
+                    assert!(!looks_mixed_operation_intent(&opt.resolved_intent));
+                }
+            }
+            _ => panic!("expected clarify outcome"),
+        }
+    }
+
+    #[test]
+    fn validate_llm_clarify_filters_mixed_options() {
+        let clarify = RouterClarify {
+            question: Some("Which should I do first?".to_string()),
+            options: vec![
+                RouterClarifyOption {
+                    id: Some("mixed".to_string()),
+                    label: "OCR then compress".to_string(),
+                    detail: "Do OCR and compression together".to_string(),
+                    resolved_intent: "First do OCR then compress and then rename the file."
+                        .to_string(),
+                },
+                RouterClarifyOption {
+                    id: Some("ocr".to_string()),
+                    label: "OCR only".to_string(),
+                    detail: "Only OCR".to_string(),
+                    resolved_intent: "Run OCR on PDF files only.".to_string(),
+                },
+                RouterClarifyOption {
+                    id: Some("rename".to_string()),
+                    label: "Rename only".to_string(),
+                    detail: "Only rename".to_string(),
+                    resolved_intent: "Rename files only.".to_string(),
+                },
+            ],
+        };
+
+        let out = validate_llm_clarify(clarify).expect("should keep non-mixed options");
+        match out {
+            RouteOutcome::Clarify { options, .. } => {
+                assert_eq!(options.len(), 2);
+                assert!(options.iter().all(|o| o.id != "mixed"));
+            }
+            _ => panic!("expected clarify"),
+        }
     }
 }

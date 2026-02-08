@@ -13,7 +13,7 @@ pub async fn perform_footer_action(app: &mut App, action: FooterAction) -> Resul
         }
         FooterAction::ToggleDebug => {
             app.show_debug = !app.show_debug;
-            app.logs.push(format!(
+            app.push_log(format!(
                 "Debug Mode: {}",
                 if app.show_debug { "ON" } else { "OFF" }
             ));
@@ -43,8 +43,8 @@ pub async fn perform_footer_action(app: &mut App, action: FooterAction) -> Resul
         }
         FooterAction::Submit => {
             if !app.input.trim().is_empty() {
-                app.logs
-                    .push(format!("Input submitted ({} chars)", app.input.len()));
+                app.push_log(format!("Input submitted ({} chars)", app.input.len()));
+                app.log_block("INPUT_SUBMIT", &app.input);
                 app.reset_for_new_request();
                 app.focus = FocusArea::FooterButtons;
                 app.footer_focus = 0;
@@ -92,7 +92,8 @@ pub async fn perform_footer_action(app: &mut App, action: FooterAction) -> Resul
             let new_cmd = app.command_draft.trim().to_string();
             if !new_cmd.is_empty() {
                 app.generated_command = Some(new_cmd.clone());
-                app.logs.push(format!("Command edited: {}", new_cmd));
+                app.push_log(format!("Command edited: {}", new_cmd));
+                app.log_block("COMMAND_EDIT", &new_cmd);
                 app.command_cursor = char_count(&app.command_draft);
                 app.dry_run_output = None;
                 app.output_scroll = 0;
@@ -118,9 +119,15 @@ pub async fn perform_footer_action(app: &mut App, action: FooterAction) -> Resul
         FooterAction::ClarifySelect(idx) => {
             if let Some(payload) = &app.clarify {
                 if let Some(opt) = payload.options.get(idx) {
-                    app.input = opt.resolved_intent.clone();
+                    let label = opt.label.clone();
+                    let resolved_intent = opt.resolved_intent.clone();
+                    app.input = resolved_intent.clone();
                     app.input_cursor = char_count(&app.input);
-                    app.logs.push(format!("Clarify selected: {}", opt.label));
+                    app.push_log(format!("Clarify selected: {}", label));
+                    app.log_block(
+                        "CLARIFY_SELECTION",
+                        &format!("label={}\nresolved_intent={}", label, resolved_intent),
+                    );
                     app.reset_for_new_request();
                     app.focus = FocusArea::FooterButtons;
                     app.footer_focus = 0;

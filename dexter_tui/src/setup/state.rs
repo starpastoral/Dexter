@@ -194,6 +194,7 @@ impl SetupApp {
 
     pub async fn refresh_runtime_statuses(&mut self) {
         let client = match reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_millis(900))
             .build()
         {

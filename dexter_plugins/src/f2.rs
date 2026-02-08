@@ -2,6 +2,7 @@ use crate::command_exec::{contains_arg, parse_and_validate_command, spawn_checke
 use crate::{DiffItem, Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
+use regex::Regex;
 use std::process::Command;
 
 pub struct F2Plugin;
@@ -80,6 +81,9 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
    - For general batch renaming, rely on the `-f` pattern to match files.
 3. OUTPUT ONLY: Output ONLY the command. No backticks, no markdown, no explanations.
 4. NO EXECUTION FLAGS: Do not include `-x` or `-X`.
+5. NEVER COLLAPSE FILES: Never generate replacements that rename many files to the same literal name.
+   - Do NOT use `-r "{{.}}"` or similar placeholder-only replacements.
+   - If `-f` uses a catch-all regex (like `.*`), `-r` must preserve uniqueness via captures (`$1`) or clear per-file variables.
 
 ### Documentation:
 {}
@@ -97,7 +101,7 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
     }
 
     fn validate_command(&self, cmd: &str) -> bool {
-        parse_and_validate_command(cmd, "f2").is_ok()
+        validate_f2_command(cmd)
     }
 
     async fn dry_run(
@@ -160,12 +164,7 @@ Your goal is to generate a precise `f2` command (a powerful batch renamer).
                     let new_name = parts[1];
                     let status = parts.get(2).map(|s| s.to_string());
 
-                    // Filter headers or empty-ish rows
-                    let old_lower = old_name.to_lowercase();
-                    if old_lower.contains("original")
-                        || old_lower.contains("filename")
-                        || old_name.chars().all(|c| c == ' ')
-                    {
+                    if is_f2_table_header(old_name, new_name, status.as_deref()) {
                         continue;
                     }
 
@@ -218,4 +217,123 @@ fn build_f2_argv(cmd: &str, execute_mode: bool) -> Result<Vec<String>> {
     }
 
     Ok(argv)
+}
+
+fn validate_f2_command(cmd: &str) -> bool {
+    let argv = match parse_and_validate_command(cmd, "f2") {
+        Ok(argv) => argv,
+        Err(_) => return false,
+    };
+
+    if has_invalid_placeholder_replacement(&argv) {
+        return false;
+    }
+
+    if catch_all_find_with_literal_replace(&argv) {
+        return false;
+    }
+
+    true
+}
+
+fn has_invalid_placeholder_replacement(argv: &[String]) -> bool {
+    let replacement = find_arg_value(argv, "-r", "--replace");
+    let Some(replacement) = replacement else {
+        return false;
+    };
+    let replacement = replacement.trim();
+    matches!(replacement, "{{.}}" | "{.}" | "{{}}" | "{ }" | "")
+}
+
+fn catch_all_find_with_literal_replace(argv: &[String]) -> bool {
+    let Some(find) = find_arg_value(argv, "-f", "--find") else {
+        return false;
+    };
+    let Some(replace) = find_arg_value(argv, "-r", "--replace") else {
+        return false;
+    };
+
+    let is_catch_all = matches!(
+        find.trim(),
+        ".*" | "^.*$" | ".+" | "^.+$" | ".{1,}" | "^.{1,}$"
+    );
+    if !is_catch_all {
+        return false;
+    }
+
+    let keeps_uniqueness = {
+        let has_capture = Regex::new(r"\$[0-9]+")
+            .map(|re| re.is_match(replace))
+            .unwrap_or(false);
+        let has_variable = Regex::new(r"\{\{[^{}]+\}\}")
+            .map(|re| re.is_match(replace))
+            .unwrap_or(false);
+        has_capture || has_variable
+    };
+
+    !keeps_uniqueness
+}
+
+fn find_arg_value<'a>(argv: &'a [String], short: &str, long: &str) -> Option<&'a str> {
+    for (idx, arg) in argv.iter().enumerate() {
+        if arg == short || arg == long {
+            return argv.get(idx + 1).map(|s| s.as_str());
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{}=", short)) {
+            return Some(value);
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{}=", long)) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn is_f2_table_header(old_name: &str, new_name: &str, status: Option<&str>) -> bool {
+    if old_name.chars().all(char::is_whitespace) {
+        return true;
+    }
+
+    let old = old_name.trim().to_lowercase();
+    let new = new_name.trim().to_lowercase();
+    let status = status.unwrap_or("").trim().to_lowercase();
+
+    let old_header = matches!(
+        old.as_str(),
+        "old" | "original" | "original filename" | "filename" | "原始文件名" | "旧文件名"
+    );
+    let new_header = matches!(
+        new.as_str(),
+        "new" | "new filename" | "目标文件名" | "新文件名" | "重命名后"
+    );
+    let status_header = matches!(status.as_str(), "status" | "状态");
+
+    old_header || new_header || status_header
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_invalid_placeholder_replace() {
+        assert!(!validate_f2_command(r#"f2 -f ".*" -r "{{.}}""#));
+    }
+
+    #[test]
+    fn validate_rejects_catch_all_literal_replace() {
+        assert!(!validate_f2_command(r#"f2 -f ".*" -r "fixed-name""#));
+    }
+
+    #[test]
+    fn validate_allows_catch_all_with_capture() {
+        assert!(validate_f2_command(
+            r#"f2 -f "(.*)\.mp3\.mp3$" -r "$1.mp3""#
+        ));
+    }
+
+    #[test]
+    fn header_detection_supports_chinese_table_labels() {
+        assert!(is_f2_table_header("原始文件名", "新文件名", Some("状态")));
+    }
 }

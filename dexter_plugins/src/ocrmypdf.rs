@@ -164,6 +164,7 @@ Your goal is to generate a valid `ocrmypdf` command.
 4. MODE RULE: Do NOT combine `--force-ocr`, `--skip-text`, `--redo-ocr`, or conflicting `--mode` values.
 5. SCOPE: Prefer these workflows: basic OCR, `-l/--language`, `--rotate-pages`, `--deskew`, one OCR mode strategy, `--sidecar`.
 6. PRECISION: Treat filenames/paths as literal strings from context.
+7. DEFAULT ROBUSTNESS: If user did not explicitly request force/redo, prefer `--skip-text` to avoid failing on PDFs that already contain text layers.
 
 ### Documentation:
 {}
@@ -296,10 +297,68 @@ Your goal is to generate a valid `ocrmypdf` command.
             } else {
                 combined
             })
+        } else if should_retry_with_skip_text(&argv, &err_output) {
+            let _ = progress_tx
+                .send(Progress {
+                    percentage: None,
+                    message: "Retrying with --skip-text (existing text layer detected)..."
+                        .to_string(),
+                })
+                .await;
+
+            let retry_argv = inject_skip_text_arg(&argv);
+            let retry_output = tokio::process::Command::new(&retry_argv[0])
+                .args(retry_argv.iter().skip(1))
+                .output()
+                .await?;
+
+            let retry_stdout = String::from_utf8_lossy(&retry_output.stdout).to_string();
+            let retry_stderr = String::from_utf8_lossy(&retry_output.stderr).to_string();
+            if retry_output.status.success() {
+                let combined = format!(
+                    "Initial run failed due to existing text layer; retried with --skip-text.\n{}\n{}",
+                    retry_stdout, retry_stderr
+                );
+                Ok(combined)
+            } else {
+                Err(anyhow::anyhow!(
+                    "ocrmypdf error (initial + retry with --skip-text):\ninitial:\n{}\nretry:\n{}\n{}",
+                    err_output,
+                    retry_stdout,
+                    retry_stderr
+                ))
+            }
         } else {
             Err(anyhow::anyhow!("ocrmypdf error:\n{}", err_output))
         }
     }
+}
+
+fn should_retry_with_skip_text(argv: &[String], err_output: &str) -> bool {
+    if contains_flag(argv, "--skip-text")
+        || contains_flag(argv, "--force-ocr")
+        || contains_flag(argv, "--redo-ocr")
+    {
+        return false;
+    }
+    if parse_mode(argv) == Some(OcrMode::Force) || parse_mode(argv) == Some(OcrMode::Redo) {
+        return false;
+    }
+    let err = err_output.to_lowercase();
+    err.contains("already has text")
+        || err.contains("priorocrfounderror")
+        || err.contains("use --skip-text")
+}
+
+fn inject_skip_text_arg(argv: &[String]) -> Vec<String> {
+    if argv.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(argv.len() + 1);
+    out.push(argv[0].clone());
+    out.push("--skip-text".to_string());
+    out.extend(argv.iter().skip(1).cloned());
+    out
 }
 
 #[cfg(test)]
@@ -369,5 +428,48 @@ mod tests {
         assert!(validate_ocrmypdf_command(
             "ocrmypdf -m skip input.pdf output.pdf"
         ));
+    }
+
+    #[test]
+    fn retry_detection_for_existing_text_layer_errors() {
+        let argv = vec![
+            "ocrmypdf".to_string(),
+            "input.pdf".to_string(),
+            "output.pdf".to_string(),
+        ];
+        assert!(should_retry_with_skip_text(
+            &argv,
+            "PriorOcrFoundError: page already has text"
+        ));
+        assert!(should_retry_with_skip_text(
+            &argv,
+            "Use --skip-text to bypass pages that already have text"
+        ));
+    }
+
+    #[test]
+    fn retry_disabled_when_mode_explicitly_selected() {
+        let argv = vec![
+            "ocrmypdf".to_string(),
+            "--force-ocr".to_string(),
+            "input.pdf".to_string(),
+            "output.pdf".to_string(),
+        ];
+        assert!(!should_retry_with_skip_text(&argv, "page already has text"));
+    }
+
+    #[test]
+    fn inject_skip_text_places_flag_after_binary() {
+        let argv = vec![
+            "ocrmypdf".to_string(),
+            "-l".to_string(),
+            "eng".to_string(),
+            "input.pdf".to_string(),
+            "output.pdf".to_string(),
+        ];
+        let injected = inject_skip_text_arg(&argv);
+        assert_eq!(injected[0], "ocrmypdf");
+        assert_eq!(injected[1], "--skip-text");
+        assert_eq!(injected[2], "-l");
     }
 }

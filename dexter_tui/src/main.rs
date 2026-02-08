@@ -3,7 +3,7 @@ mod setup;
 mod theme;
 mod ui;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
@@ -14,7 +14,7 @@ use crossterm::{
 };
 use dexter_core::Config;
 use ratatui::Terminal;
-use std::io::stdout;
+use std::io::{stdin, stdout, IsTerminal};
 
 use crate::app::runtime::run_app;
 use crate::app::state::App;
@@ -22,6 +22,12 @@ use crate::setup::runtime::run_setup_wizard;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if !stdin().is_terminal() || !stdout().is_terminal() {
+        return Err(anyhow!(
+            "Dexter requires an interactive terminal (TTY). Run `dexter` directly in a terminal."
+        ));
+    }
+
     let mut config = Config::load().await?;
 
     enable_raw_mode()?;

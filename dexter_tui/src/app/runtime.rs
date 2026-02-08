@@ -19,6 +19,7 @@ use crate::app::editor::{
 use crate::app::state::{App, AppState, ClarifyPayload, FocusArea, FooterAction};
 use crate::setup::runtime::run_settings_panel;
 use crate::ui::main_view::ui;
+use dexter_plugins::PreviewContent;
 
 pub async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -166,7 +167,7 @@ async fn progress_state_and_settings(
                         Ok(outcome) => match outcome {
                             RouteOutcome::Selected { plugin, .. } => {
                                 app.selected_plugin = Some(plugin.clone());
-                                app.logs.push(format!("Routed to plugin: {}", plugin));
+                                app.push_log(format!("Routed to plugin: {}", plugin));
                                 app.generation_cache_policy = CachePolicy::Normal;
                                 app.state = AppState::PendingGeneration;
                                 app.dirty = true;
@@ -176,8 +177,8 @@ async fn progress_state_and_settings(
                                     "This request isn’t supported.\n{}\nTry: convert formats or rename files (rename only, no conversion).",
                                     reason
                                 ));
-                                app.logs
-                                    .push("Routing result: unsupported request".to_string());
+                                app.push_log("Routing result: unsupported request".to_string());
+                                app.log_block("ROUTING_UNSUPPORTED", &reason);
                                 app.state = AppState::Input;
                                 app.focus = FocusArea::Proposal;
                                 app.footer_focus = 0;
@@ -186,9 +187,11 @@ async fn progress_state_and_settings(
                             RouteOutcome::Clarify {
                                 question, options, ..
                             } => {
+                                let clarify_text = format_clarify_block(&question, &options);
                                 app.clarify = Some(ClarifyPayload { question, options });
                                 app.notice = None;
-                                app.logs.push("Routing requires clarification".to_string());
+                                app.push_log("Routing requires clarification".to_string());
+                                app.log_block("ROUTING_CLARIFY", &clarify_text);
                                 app.state = AppState::Clarifying;
                                 app.focus = FocusArea::FooterButtons;
                                 app.footer_focus = 0;
@@ -196,6 +199,7 @@ async fn progress_state_and_settings(
                             }
                         },
                         Err(e) => {
+                            app.log_block("ROUTING_ERROR", &e.to_string());
                             app.state = AppState::Error(format!("Routing error: {}", e));
                             app.dirty = true;
                         }
@@ -212,13 +216,15 @@ async fn progress_state_and_settings(
                             app.generated_command = Some(cmd.clone());
                             app.command_draft = cmd.clone();
                             app.command_cursor = char_count(&app.command_draft);
-                            app.logs.push(format!("Generated command: {}", cmd));
+                            app.push_log(format!("Generated command: {}", cmd));
+                            app.log_block("GENERATED_COMMAND", &cmd);
                             app.dry_run_output = None;
                             app.output_scroll = 0;
                             app.state = AppState::PendingDryRun;
                             app.dirty = true;
                         }
                         Err(e) => {
+                            app.log_block("GENERATION_ERROR", &e.to_string());
                             app.state = AppState::Error(format!("Generation error: {}", e));
                             app.dirty = true;
                         }
@@ -232,15 +238,17 @@ async fn progress_state_and_settings(
                     app.dry_run_result_rx = None;
                     match result {
                         Ok(output) => {
-                            app.logs
-                                .push("Preview data captured successfully".to_string());
+                            let preview_text = preview_to_log(&output);
+                            app.push_log("Preview data captured successfully.".to_string());
+                            app.log_block("DRY_RUN_PREVIEW", &preview_text);
                             app.dry_run_output = Some(output);
                             app.output_scroll = 0;
                             app.state = AppState::AwaitingConfirmation;
                             app.dirty = true;
                         }
                         Err(e) => {
-                            app.logs.push(format!("Preview failed: {}", e));
+                            app.push_log(format!("Preview failed: {}", e));
+                            app.log_block("DRY_RUN_ERROR", &e.to_string());
                             app.state = AppState::Error(format!("Dry run failed: {}", e));
                             app.dirty = true;
                         }
@@ -252,6 +260,12 @@ async fn progress_state_and_settings(
             // Check for progress updates.
             if let Some(rx) = &mut app.progress_rx {
                 while let Ok(prog) = rx.try_recv() {
+                    let progress_line = if let Some(pct) = prog.percentage {
+                        format!("{:.1}% {}", pct, prog.message)
+                    } else {
+                        prog.message.clone()
+                    };
+                    app.session_logger.event("PROGRESS", &progress_line);
                     app.progress = Some(prog);
                     app.dirty = true;
                 }
@@ -264,13 +278,14 @@ async fn progress_state_and_settings(
                     finished = true;
                     match result {
                         Ok(output) => {
+                            app.log_block("EXECUTION_OUTPUT", &output);
                             app.state = AppState::Finished(output);
-                            app.logs
-                                .push("Execution completed successfully.".to_string());
+                            app.push_log("Execution completed successfully.".to_string());
                             let _ = app.update_context().await;
                             app.dirty = true;
                         }
                         Err(e) => {
+                            app.log_block("EXECUTION_ERROR", &e.to_string());
                             app.state = AppState::Error(format!("Execution failed: {}", e));
                             app.dirty = true;
                         }
@@ -301,19 +316,19 @@ async fn progress_state_and_settings(
                 | AppState::PendingDryRun
         );
         if busy {
-            app.logs
-                .push("Cannot open settings while a task is running.".to_string());
+            app.push_log("Cannot open settings while a task is running.".to_string());
         } else {
             match run_settings_panel(terminal, app.config.clone()).await {
                 Ok(new_config) => {
                     app.apply_config(new_config);
-                    app.logs.push("Settings updated.".to_string());
+                    app.push_log("Settings updated.".to_string());
                     app.dirty = true;
                 }
                 Err(e) => {
                     let msg = e.to_string();
                     if !msg.to_lowercase().contains("aborted") {
-                        app.logs.push(format!("Settings update failed: {}", msg));
+                        app.push_log(format!("Settings update failed: {}", msg));
+                        app.log_block("SETTINGS_ERROR", &msg);
                         app.dirty = true;
                     }
                 }
@@ -322,6 +337,40 @@ async fn progress_state_and_settings(
     }
 
     Ok(())
+}
+
+fn preview_to_log(preview: &PreviewContent) -> String {
+    match preview {
+        PreviewContent::Text(text) => text.clone(),
+        PreviewContent::DiffList(diffs) => {
+            if diffs.is_empty() {
+                return "No changes detected.".to_string();
+            }
+            let mut out = Vec::new();
+            for (idx, diff) in diffs.iter().enumerate() {
+                out.push(format!("FILE {:02}", idx + 1));
+                if let Some(status) = &diff.status {
+                    out.push(format!("status={}", status));
+                }
+                out.push(format!("old={}", diff.original));
+                out.push(format!("new={}", diff.new));
+                out.push(String::new());
+            }
+            out.join("\n")
+        }
+    }
+}
+
+fn format_clarify_block(question: &str, options: &[dexter_core::ClarifyOption]) -> String {
+    let mut out = vec![format!("question={}", question)];
+    for opt in options {
+        out.push(format!("option.id={}", opt.id));
+        out.push(format!("option.label={}", opt.label));
+        out.push(format!("option.detail={}", opt.detail));
+        out.push(format!("option.resolved_intent={}", opt.resolved_intent));
+        out.push(String::new());
+    }
+    out.join("\n")
 }
 
 async fn handle_runtime_event(app: &mut App, event: Event) -> Result<bool> {

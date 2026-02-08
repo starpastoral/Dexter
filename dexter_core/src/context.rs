@@ -36,10 +36,16 @@ impl ContextScanner {
         if files.len() > 20 {
             // Fallback to summary
             let summary = format!(
-                "Directory contains {} files and {} subdirectories. Top 5 files: {}",
+                "Directory contains {} files and {} subdirectories.\nTop 5 files:\n{}",
                 file_count,
                 dir_count,
-                files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                files
+                    .iter()
+                    .take(5)
+                    .enumerate()
+                    .map(|(i, f)| format!("{}. {}", i + 1, f))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
             Ok(FileContext {
                 files: files.into_iter().take(20).collect(),

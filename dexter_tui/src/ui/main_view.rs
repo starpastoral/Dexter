@@ -434,8 +434,8 @@ fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
         let mut style = app.theme.footer_key_style;
         if app.focus == FocusArea::FooterButtons && app.footer_focus == i {
             style = style
-                .add_modifier(Modifier::REVERSED)
-                .add_modifier(Modifier::BOLD);
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED);
         }
 
         let text = display_texts.get(i).cloned().unwrap_or_default();
@@ -684,14 +684,6 @@ fn render_input_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     ]);
 
     if let Some(ctx) = &app.current_context {
-        let files_str = if ctx.files.is_empty() {
-            " (Empty)".to_string()
-        } else if ctx.files.len() > 10 {
-            format!("{} files detected (Scan complete)", ctx.files.len())
-        } else {
-            ctx.files.join(", ")
-        };
-
         text.push(Line::from(vec![
             Span::styled(" CWD_CONTEXT: ", theme.header_subtitle_style),
             Span::styled(
@@ -699,10 +691,32 @@ fn render_input_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
                 theme.header_subtitle_style,
             ),
         ]));
-        text.push(Line::from(vec![
-            Span::styled(" FILES: ", theme.header_subtitle_style),
-            Span::styled(files_str, theme.header_subtitle_style),
-        ]));
+        text.push(Line::from(Span::styled(
+            " FILES:",
+            theme.header_subtitle_style,
+        )));
+        if ctx.files.is_empty() {
+            text.push(Line::from(vec![
+                Span::styled("   - ", theme.header_subtitle_style),
+                Span::styled("(Empty)", theme.header_subtitle_style),
+            ]));
+        } else {
+            for (idx, file) in ctx.files.iter().take(12).enumerate() {
+                text.push(Line::from(vec![
+                    Span::styled(format!("   {:02}. ", idx + 1), theme.header_subtitle_style),
+                    Span::styled(file, theme.header_subtitle_style),
+                ]));
+            }
+            if ctx.files.len() > 12 {
+                text.push(Line::from(vec![
+                    Span::styled("   ... ", theme.header_subtitle_style),
+                    Span::styled(
+                        format!("{} more files", ctx.files.len() - 12),
+                        theme.header_subtitle_style,
+                    ),
+                ]));
+            }
+        }
         text.push(Line::from(""));
     }
 

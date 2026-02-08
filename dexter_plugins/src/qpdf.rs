@@ -138,6 +138,9 @@ Your goal is to generate a valid `qpdf` command.
 6. SCOPE: Prefer these workflows only: `--check`, `--linearize`, `--decrypt`, `--encrypt`, `--pages ... --`.
 7. PAGES SYNTAX: If using `--pages`, include terminating `--` before output.
 8. PRECISION: Treat paths and filenames as literal strings from context.
+9. ARG SHAPE:
+   - `--check` should only inspect input PDF (no transform output path).
+   - `--linearize`, `--decrypt`, and `--encrypt` require explicit input + output paths.
 
 ### Documentation:
 {}

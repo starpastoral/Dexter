@@ -957,10 +957,16 @@ fn truncate_error(text: &str) -> String {
 
 fn build_http_client() -> Client {
     Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .build()
-        .unwrap_or_else(|_| Client::new())
+        .unwrap_or_else(|_| {
+            Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_else(|_| panic!("failed to initialize HTTP client"))
+        })
 }
 
 fn clean_optional(input: String) -> Option<String> {

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::editor::char_count;
+use crate::app::session_log::SessionLogger;
 use crate::theme::Theme;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -106,6 +107,7 @@ pub struct App {
     pub generation_cache_policy: CachePolicy,
     pub pending_open_settings: bool,
     pub dirty: bool,
+    pub session_logger: SessionLogger,
 }
 
 impl App {
@@ -125,8 +127,8 @@ impl App {
         );
 
         let theme = Theme::from_config(&config.theme);
-
-        Self {
+        let session_logger = SessionLogger::new();
+        let mut app = Self {
             state: AppState::Input,
             input: String::new(),
             input_cursor: 0,
@@ -147,7 +149,7 @@ impl App {
             generated_command: None,
             command_draft: String::new(),
             command_cursor: 0,
-            logs: vec!["Dexter initialized. Ready for your command.".to_string()],
+            logs: Vec::new(),
             tick_count: 0,
             current_context: None,
             dry_run_output: None,
@@ -174,7 +176,13 @@ impl App {
             generation_cache_policy: CachePolicy::Normal,
             pending_open_settings: false,
             dirty: true,
+            session_logger,
+        };
+        app.push_log("Dexter initialized. Ready for your command.");
+        if let Some(path) = app.session_logger.display_path() {
+            app.push_log(format!("Session log file: {}", path));
         }
+        app
     }
 
     pub fn apply_config(&mut self, config: Config) {
@@ -201,27 +209,38 @@ impl App {
 
     pub async fn update_context(&mut self) -> Result<()> {
         let context = ContextScanner::scan_cwd().await?;
+        let summary = format_context_lines(&context);
+        self.session_logger.block("CONTEXT_SCAN", &summary);
+        self.push_log(format!("Context scanned ({} files).", context.files.len()));
         self.current_context = Some(context);
         self.dirty = true;
         Ok(())
     }
 
     pub async fn execute_command(&mut self) -> Result<()> {
-        if let Some(ref cmd) = self.generated_command {
+        if let Some(cmd) = self.generated_command.clone() {
             let plugin_name = self.selected_plugin.clone().unwrap_or_default();
 
             let plugin = self
                 .plugins
                 .iter()
                 .find(|p| p.name() == plugin_name)
-                .ok_or_else(|| anyhow!("Plugin not found"))?;
+                .ok_or_else(|| anyhow!("Plugin not found"))?
+                .clone();
 
-            if let Err(e) = SafetyGuard::default().check(cmd) {
+            if let Err(e) = SafetyGuard::default().check(&cmd) {
+                self.push_log(format!("Safety check failed before execution: {}", e));
+                self.log_block("EXECUTE_BLOCKED", &format!("command={}\nreason={}", cmd, e));
                 self.state = AppState::Error(format!("Safety check failed: {}", e));
                 self.dirty = true;
                 return Ok(());
             }
-            if !plugin.validate_command(cmd) {
+            if !plugin.validate_command(&cmd) {
+                self.push_log("Plugin validation failed before execution.".to_string());
+                self.log_block(
+                    "EXECUTE_BLOCKED",
+                    &format!("command={}\nreason=plugin_validation", cmd),
+                );
                 self.state = AppState::Error("Command failed plugin validation logic".to_string());
                 self.dirty = true;
                 return Ok(());
@@ -229,14 +248,16 @@ impl App {
 
             self.state = AppState::Executing;
             self.output_scroll = 0;
-            self.logs
-                .push(format!("Executing [{}]: {}", plugin_name, cmd));
-            if let Err(e) = self.executor.record_history(&plugin_name, cmd).await {
-                self.logs.push(format!("History log failed: {}", e));
+            self.push_log(format!("Executing [{}]: {}", plugin_name, cmd));
+            if let Err(e) = self.executor.record_history(&plugin_name, &cmd).await {
+                self.push_log(format!("History log failed: {}", e));
             }
+            self.session_logger.block(
+                "EXECUTE_COMMAND",
+                &format!("plugin={}\ncommand={}", plugin_name, cmd),
+            );
 
-            let plugin = plugin.clone();
-            let final_cmd = cmd.clone();
+            let final_cmd = cmd;
 
             let (prog_tx, prog_rx) = mpsc::channel(10);
             let (res_tx, res_rx) = oneshot::channel();
@@ -251,6 +272,21 @@ impl App {
             self.dirty = true;
         }
         Ok(())
+    }
+
+    pub fn push_log<S: Into<String>>(&mut self, message: S) {
+        let message = message.into();
+        self.session_logger.event("LOG", &message);
+        self.logs.push(message);
+        const MAX_LOG_LINES: usize = 500;
+        if self.logs.len() > MAX_LOG_LINES {
+            let overflow = self.logs.len() - MAX_LOG_LINES;
+            self.logs.drain(0..overflow);
+        }
+    }
+
+    pub fn log_block(&self, label: &str, body: &str) {
+        self.session_logger.block(label, body);
     }
 
     pub fn reset_for_new_request(&mut self) {
@@ -301,4 +337,20 @@ impl App {
                 | AppState::PendingDryRun
         )
     }
+}
+
+fn format_context_lines(ctx: &dexter_core::context::FileContext) -> String {
+    if ctx.files.is_empty() {
+        return "No non-hidden files found in current directory.".to_string();
+    }
+
+    let mut out = Vec::new();
+    out.push(format!("File count: {}", ctx.files.len()));
+    for (idx, file) in ctx.files.iter().enumerate() {
+        out.push(format!("{:02}. {}", idx + 1, file));
+    }
+    if let Some(summary) = &ctx.summary {
+        out.push(format!("Summary: {}", summary));
+    }
+    out.join("\n")
 }
