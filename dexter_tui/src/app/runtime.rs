@@ -7,7 +7,7 @@ use dexter_core::{CachePolicy, Executor, RouteOutcome, Router, SafetyGuard};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::Stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 use crate::app::actions::perform_footer_action;
@@ -20,6 +20,8 @@ use crate::app::state::{App, AppState, ClarifyPayload, FocusArea, FooterAction};
 use crate::setup::runtime::run_settings_panel;
 use crate::ui::main_view::ui;
 use dexter_plugins::PreviewContent;
+
+const PROGRESS_LOG_MIN_INTERVAL: Duration = Duration::from_millis(800);
 
 pub async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -265,7 +267,18 @@ async fn progress_state_and_settings(
                     } else {
                         prog.message.clone()
                     };
-                    app.session_logger.event("PROGRESS", &progress_line);
+                    let now = Instant::now();
+                    let line_changed =
+                        app.last_progress_log_line.as_deref() != Some(progress_line.as_str());
+                    let interval_elapsed = app
+                        .last_progress_log_at
+                        .map(|last| now.duration_since(last) >= PROGRESS_LOG_MIN_INTERVAL)
+                        .unwrap_or(true);
+                    if line_changed || interval_elapsed {
+                        app.session_logger.event("PROGRESS", &progress_line);
+                        app.last_progress_log_line = Some(progress_line);
+                        app.last_progress_log_at = Some(now);
+                    }
                     app.progress = Some(prog);
                     app.dirty = true;
                 }
@@ -297,6 +310,8 @@ async fn progress_state_and_settings(
                 app.progress_rx = None;
                 app.execution_result_rx = None;
                 app.progress = None;
+                app.last_progress_log_line = None;
+                app.last_progress_log_at = None;
                 app.dirty = true;
             }
         }

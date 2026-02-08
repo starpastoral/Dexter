@@ -302,18 +302,8 @@ fn rule_precheck(user_input: &str) -> Option<RouteOutcome> {
         });
     }
 
-    let rename_keywords = [
-        "rename",
-        "renaming",
-        "change extension",
-        "rename to",
-        "rename as",
-        "改名",
-        "重命名",
-    ];
-    let convert_keywords = ["convert", "conversion", "transcode", "转成", "转换"];
-    let has_rename = contains_any(&lower, &rename_keywords);
-    let has_convert = contains_any(&lower, &convert_keywords) || lower.contains("->");
+    let has_rename = contains_any(&lower, RENAME_KEYWORDS);
+    let has_convert = contains_any(&lower, CONVERT_KEYWORDS) || lower.contains("->");
 
     if has_rename && exts.len() >= 2 && (has_convert || has_media) {
         let (src, dst) = pick_src_dst(&exts);
@@ -420,70 +410,57 @@ enum OperationIntent {
     Dedupe,
 }
 
+const RENAME_KEYWORDS: &[&str] = &[
+    "rename",
+    "renaming",
+    "change extension",
+    "rename to",
+    "rename as",
+    "改名",
+    "重命名",
+    "后缀",
+];
+const OCR_KEYWORDS: &[&str] = &[
+    "ocr",
+    "文字识别",
+    "识别文字",
+    "扫描文字",
+    "扫描识别",
+    "可搜索",
+];
+const COMPRESS_KEYWORDS: &[&str] = &["compress", "compression", "压缩", "减小体积"];
+const CONVERT_KEYWORDS: &[&str] = &["convert", "conversion", "transcode", "转成", "转换"];
+const EXTRACT_AUDIO_KEYWORDS: &[&str] = &[
+    "extract audio",
+    "audio extract",
+    "提取音频",
+    "抽取音频",
+    "音频提取",
+];
+const DEDUPE_KEYWORDS: &[&str] = &[
+    "duplicate",
+    "duplicates",
+    "dedupe",
+    "jdupes",
+    "去重",
+    "重复文件",
+];
+const OPERATION_INTENT_KEYWORDS: &[(OperationIntent, &[&str])] = &[
+    (OperationIntent::Rename, RENAME_KEYWORDS),
+    (OperationIntent::Ocr, OCR_KEYWORDS),
+    (OperationIntent::Compress, COMPRESS_KEYWORDS),
+    (OperationIntent::Convert, CONVERT_KEYWORDS),
+    (OperationIntent::ExtractAudio, EXTRACT_AUDIO_KEYWORDS),
+    (OperationIntent::Dedupe, DEDUPE_KEYWORDS),
+];
+
 fn detect_operation_intents(lower: &str) -> Vec<OperationIntent> {
     let mut intents = Vec::new();
 
-    if contains_any(
-        lower,
-        &[
-            "rename",
-            "renaming",
-            "change extension",
-            "rename to",
-            "rename as",
-            "改名",
-            "重命名",
-            "后缀",
-        ],
-    ) {
-        intents.push(OperationIntent::Rename);
-    }
-    if contains_any(
-        lower,
-        &[
-            "ocr",
-            "文字识别",
-            "识别文字",
-            "扫描文字",
-            "扫描识别",
-            "可搜索",
-        ],
-    ) {
-        intents.push(OperationIntent::Ocr);
-    }
-    if contains_any(lower, &["compress", "compression", "压缩", "减小体积"]) {
-        intents.push(OperationIntent::Compress);
-    }
-    if contains_any(
-        lower,
-        &[
-            "extract audio",
-            "audio extract",
-            "提取音频",
-            "抽取音频",
-            "音频提取",
-        ],
-    ) {
-        intents.push(OperationIntent::ExtractAudio);
-    }
-    if contains_any(
-        lower,
-        &["convert", "conversion", "transcode", "转成", "转换"],
-    ) {
-        intents.push(OperationIntent::Convert);
-    }
-    if contains_any(
-        lower,
-        &[
-            "duplicate",
-            "duplicates",
-            "dedupe",
-            "jdupes",
-            "去重",
-            "重复文件",
-        ],
-    ) {
-        intents.push(OperationIntent::Dedupe);
+    for (intent, keywords) in OPERATION_INTENT_KEYWORDS {
+        if contains_any(lower, keywords) {
+            intents.push(*intent);
+        }
     }
 
     intents

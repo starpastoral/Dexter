@@ -9,6 +9,7 @@ use dexter_plugins::{
 };
 use ratatui::layout::Rect;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::editor::char_count;
@@ -104,6 +105,8 @@ pub struct App {
     pub progress_rx: Option<mpsc::Receiver<dexter_plugins::Progress>>,
     pub execution_result_rx: Option<oneshot::Receiver<Result<String>>>,
     pub progress: Option<dexter_plugins::Progress>,
+    pub last_progress_log_line: Option<String>,
+    pub last_progress_log_at: Option<Instant>,
     pub generation_cache_policy: CachePolicy,
     pub pending_open_settings: bool,
     pub dirty: bool,
@@ -173,6 +176,8 @@ impl App {
             progress_rx: None,
             execution_result_rx: None,
             progress: None,
+            last_progress_log_line: None,
+            last_progress_log_at: None,
             generation_cache_policy: CachePolicy::Normal,
             pending_open_settings: false,
             dirty: true,
@@ -269,6 +274,8 @@ impl App {
             self.progress_rx = Some(prog_rx);
             self.execution_result_rx = Some(res_rx);
             self.progress = None;
+            self.last_progress_log_line = None;
+            self.last_progress_log_at = None;
             self.dirty = true;
         }
         Ok(())
@@ -305,6 +312,8 @@ impl App {
         self.progress_rx = None;
         self.execution_result_rx = None;
         self.progress = None;
+        self.last_progress_log_line = None;
+        self.last_progress_log_at = None;
         self.dirty = true;
     }
 
@@ -319,6 +328,8 @@ impl App {
         self.notice = None;
         self.clarify = None;
         self.generation_cache_policy = CachePolicy::Normal;
+        self.last_progress_log_line = None;
+        self.last_progress_log_at = None;
         self.input_cursor = char_count(&self.input);
         self.focus = FocusArea::Proposal;
         self.footer_focus = 0;

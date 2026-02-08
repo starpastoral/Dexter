@@ -1,4 +1,4 @@
-use crate::command_exec::parse_and_validate_command;
+use crate::command_exec::{parse_and_validate_command, spawn_checked_async};
 use crate::{LlmBridge, Plugin, PreviewContent, Progress};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -182,10 +182,8 @@ Your goal is to generate a valid `pandoc` command.
             .await;
 
         let argv = parse_and_validate_command(cmd, "pandoc")?;
-        let output = tokio::process::Command::new(&argv[0])
-            .args(argv.iter().skip(1))
-            .output()
-            .await?;
+        let cwd = std::env::current_dir()?;
+        let output = spawn_checked_async(&argv, cwd).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

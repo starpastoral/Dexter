@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use tokio::process::{Child, Command as TokioCommand};
 
 const FORBIDDEN_EXACT_TOKENS: &[&str] = &[";", "&&", "||", "|", ">", "<", ">>", "<<"];
 const FORBIDDEN_SUBSTRINGS: &[&str] = &["`", "$(", "${", ";", "&&", "||", "|", ">", "<"];
@@ -48,6 +49,31 @@ pub fn spawn_checked(argv: &[String], cwd: impl AsRef<Path>) -> Result<Output> {
     Ok(output)
 }
 
+pub async fn spawn_checked_async(argv: &[String], cwd: impl AsRef<Path>) -> Result<Output> {
+    if argv.is_empty() {
+        return Err(anyhow!("Command is empty"));
+    }
+
+    let mut cmd = TokioCommand::new(&argv[0]);
+    cmd.args(argv.iter().skip(1)).current_dir(cwd.as_ref());
+    let output = cmd.output().await?;
+    Ok(output)
+}
+
+pub fn spawn_checked_piped(argv: &[String], cwd: impl AsRef<Path>) -> Result<Child> {
+    if argv.is_empty() {
+        return Err(anyhow!("Command is empty"));
+    }
+
+    let mut cmd = TokioCommand::new(&argv[0]);
+    cmd.args(argv.iter().skip(1))
+        .current_dir(cwd.as_ref())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn()?;
+    Ok(child)
+}
+
 pub fn contains_arg(argv: &[String], arg: &str) -> bool {
     argv.iter().any(|a| a == arg)
 }
@@ -85,5 +111,20 @@ mod tests {
         assert_eq!(argv[1], "in file.md");
         assert_eq!(argv[2], "-o");
         assert_eq!(argv[3], "out file.pdf");
+    }
+
+    #[test]
+    fn spawn_checked_rejects_empty_argv() {
+        assert!(spawn_checked(&[], ".").is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_checked_async_rejects_empty_argv() {
+        assert!(spawn_checked_async(&[], ".").await.is_err());
+    }
+
+    #[test]
+    fn spawn_checked_piped_rejects_empty_argv() {
+        assert!(spawn_checked_piped(&[], ".").is_err());
     }
 }

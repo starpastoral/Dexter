@@ -1,9 +1,9 @@
-use crate::command_exec::{contains_arg, parse_and_validate_command};
+use crate::command_exec::{contains_arg, parse_and_validate_command, spawn_checked_piped};
 use crate::{Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 
@@ -139,12 +139,8 @@ Your goal is to generate a valid `yt-dlp` command.
             argv.push("--newline".to_string());
         }
 
-        let mut command = tokio::process::Command::new(&argv[0]);
-        command
-            .args(argv.iter().skip(1))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
+        let cwd = std::env::current_dir()?;
+        let mut child = spawn_checked_piped(&argv, &cwd)?;
 
         let stderr = child
             .stderr

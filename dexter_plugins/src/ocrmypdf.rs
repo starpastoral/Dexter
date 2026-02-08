@@ -1,9 +1,9 @@
-use crate::command_exec::parse_and_validate_command;
+use crate::command_exec::{parse_and_validate_command, spawn_checked_async, spawn_checked_piped};
 use crate::{LlmBridge, Plugin, PreviewContent, Progress};
 use anyhow::Result;
 use async_trait::async_trait;
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 
@@ -220,13 +220,8 @@ Your goal is to generate a valid `ocrmypdf` command.
             })
             .await;
 
-        let mut command = tokio::process::Command::new(&argv[0]);
-        command
-            .args(argv.iter().skip(1))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command.spawn()?;
+        let cwd = std::env::current_dir()?;
+        let mut child = spawn_checked_piped(&argv, &cwd)?;
 
         let stderr = child
             .stderr
@@ -307,10 +302,7 @@ Your goal is to generate a valid `ocrmypdf` command.
                 .await;
 
             let retry_argv = inject_skip_text_arg(&argv);
-            let retry_output = tokio::process::Command::new(&retry_argv[0])
-                .args(retry_argv.iter().skip(1))
-                .output()
-                .await?;
+            let retry_output = spawn_checked_async(&retry_argv, &cwd).await?;
 
             let retry_stdout = String::from_utf8_lossy(&retry_output.stdout).to_string();
             let retry_stderr = String::from_utf8_lossy(&retry_output.stderr).to_string();

@@ -1,8 +1,8 @@
-use crate::command_exec::parse_and_validate_command;
+use crate::command_exec::{parse_and_validate_command, spawn_checked_piped};
 use crate::{Plugin, PreviewContent};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use tokio::io::AsyncBufReadExt;
 
 pub struct FFmpegPlugin;
@@ -117,13 +117,8 @@ Your goal is to generate a valid `ffmpeg` command.
         progress_tx: tokio::sync::mpsc::Sender<crate::Progress>,
     ) -> Result<String> {
         let argv = parse_and_validate_command(cmd, "ffmpeg")?;
-        let mut command = tokio::process::Command::new(&argv[0]);
-        command
-            .args(argv.iter().skip(1))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command.spawn()?;
+        let cwd = std::env::current_dir()?;
+        let mut child = spawn_checked_piped(&argv, &cwd)?;
 
         // FFmpeg writes progress to stderr
         let stderr = child
