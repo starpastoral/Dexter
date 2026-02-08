@@ -11,6 +11,14 @@ pub async fn perform_footer_action(app: &mut App, action: FooterAction) -> Resul
             app.pending_open_settings = true;
             app.dirty = true;
         }
+        FooterAction::ToggleHistory => {
+            if app.state == AppState::History {
+                app.close_history_view();
+            } else {
+                app.open_history_view().await?;
+            }
+            app.dirty = true;
+        }
         FooterAction::ToggleDebug => {
             app.show_debug = !app.show_debug;
             app.push_log(format!(
@@ -115,6 +123,18 @@ pub async fn perform_footer_action(app: &mut App, action: FooterAction) -> Resul
         }
         FooterAction::ResetToInput => {
             app.reset_to_input_preserve_text();
+        }
+        FooterAction::CloseHistory => {
+            app.close_history_view();
+            app.dirty = true;
+        }
+        FooterAction::ToggleHistoryPin => {
+            app.toggle_history_pin_for_selected().await?;
+            app.dirty = true;
+        }
+        FooterAction::ExecuteHistoryCommand => {
+            app.execute_history_selected_command().await?;
+            app.dirty = true;
         }
         FooterAction::ClarifySelect(idx) => {
             if let Some(payload) = &app.clarify {

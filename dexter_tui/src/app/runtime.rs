@@ -405,7 +405,7 @@ async fn handle_key_press(app: &mut App, key: KeyEvent) -> Result<bool> {
         && matches!(app.state, AppState::Input | AppState::EditingCommand);
 
     // Global output scrolling keys (work in most states).
-    if !editing {
+    if !editing && app.state != AppState::History {
         match key.code {
             KeyCode::Up => {
                 app.output_scroll = app.output_scroll.saturating_sub(1);
@@ -429,6 +429,18 @@ async fn handle_key_press(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             KeyCode::End => {
                 app.output_scroll = app.output_max_scroll;
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
+    if !editing {
+        match key.code {
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                if perform_footer_action(app, FooterAction::ToggleHistory).await? {
+                    return Ok(true);
+                }
                 return Ok(false);
             }
             _ => {}
@@ -470,7 +482,17 @@ async fn handle_key_press(app: &mut App, key: KeyEvent) -> Result<bool> {
                 return Ok(false);
             }
         }
-        KeyCode::Enter | KeyCode::Char(' ') => {
+        KeyCode::Enter => {
+            if app.focus == FocusArea::FooterButtons {
+                if let Some(action) = app.footer_buttons.get(app.footer_focus).map(|b| b.action) {
+                    if perform_footer_action(app, action).await? {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+        }
+        KeyCode::Char(' ') => {
             if app.focus == FocusArea::FooterButtons {
                 if let Some(action) = app.footer_buttons.get(app.footer_focus).map(|b| b.action) {
                     if perform_footer_action(app, action).await? {
@@ -661,6 +683,30 @@ async fn handle_key_press(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             _ => {}
         },
+        AppState::History => match key.code {
+            KeyCode::Up => app.history_move_up(),
+            KeyCode::Down => app.history_move_down(),
+            KeyCode::PageUp => app.history_page_up(),
+            KeyCode::PageDown => app.history_page_down(),
+            KeyCode::Home => app.history_home(),
+            KeyCode::End => app.history_end(),
+            KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('e') | KeyCode::Char('E') => {
+                if perform_footer_action(app, FooterAction::ExecuteHistoryCommand).await? {
+                    return Ok(true);
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                if perform_footer_action(app, FooterAction::ToggleHistoryPin).await? {
+                    return Ok(true);
+                }
+            }
+            KeyCode::Esc => {
+                if perform_footer_action(app, FooterAction::CloseHistory).await? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        },
         AppState::Finished(_) | AppState::Error(_) => match key.code {
             KeyCode::Char('r') => {
                 if perform_footer_action(app, FooterAction::Retry).await? {
@@ -741,6 +787,15 @@ async fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Result<bool> {
 
             // Otherwise, treat it as a click on the button bar (if any) or focus change.
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(rect) = app.history_button_rect {
+                    if point_in_rect(rect, mouse.column, mouse.row) {
+                        if perform_footer_action(app, FooterAction::ToggleHistory).await? {
+                            return Ok(true);
+                        }
+                        return Ok(false);
+                    }
+                }
+
                 if let Some(rect) = app.settings_button_rect {
                     if point_in_rect(rect, mouse.column, mouse.row) {
                         if perform_footer_action(app, FooterAction::Settings).await? {

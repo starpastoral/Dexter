@@ -70,6 +70,19 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             ));
             (" USER INPUT ", lines)
         }
+        AppState::History => {
+            let mut lines = vec![Line::from("")];
+            lines.extend(render_multiline_prompt(
+                &app.input,
+                Span::styled(" > ", app.theme.header_subtitle_style),
+                Span::styled("   ", app.theme.header_subtitle_style),
+                app.theme.header_subtitle_style,
+                None,
+                false,
+                None,
+            ));
+            (" USER INPUT ", lines)
+        }
         AppState::EditingCommand => {
             let mut lines = vec![Line::from("")];
             let cmd_cursor = app
@@ -157,7 +170,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     });
 
     // --- SECTION 3: BUTTON BAR (INTERACTIVE) ---
-    render_button_bar(f, app, main_layout[2]);
+    render_button_row(f, app, main_layout[2]);
 
     // --- SECTION 4: OUTPUT (PREVIEW / LOGS / STATUS) + OPTIONAL SCROLLBAR ---
     let output_title = output_title(app);
@@ -369,6 +382,64 @@ fn button_row_width(buttons: &[(FooterAction, String)]) -> u16 {
     width
 }
 
+fn render_button_row(f: &mut Frame, app: &mut App, area: Rect) {
+    app.history_button_rect = None;
+
+    if area.width == 0 || area.height == 0 {
+        render_button_bar(f, app, area);
+        return;
+    }
+
+    let compact = area.width < 92;
+    let history_label = if compact { " [HIST] " } else { " [HISTORY] " };
+    let history_width = history_label.len() as u16;
+
+    if area.width < history_width {
+        render_button_bar(f, app, Rect { width: 0, ..area });
+        return;
+    }
+
+    if area.width == history_width {
+        render_button_bar(f, app, Rect { width: 0, ..area });
+        let mut history_style = app.theme.footer_key_style;
+        if app.state == AppState::History {
+            history_style = history_style
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED);
+        }
+        let history_button = Paragraph::new(history_label).style(history_style);
+        f.render_widget(history_button, area);
+        app.history_button_rect = Some(area);
+        return;
+    }
+
+    let left_width = area.width.saturating_sub(history_width + 1);
+    let left_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: left_width,
+        height: area.height,
+    };
+    let history_area = Rect {
+        x: area.x + left_width + 1,
+        y: area.y,
+        width: history_width,
+        height: area.height,
+    };
+
+    render_button_bar(f, app, left_area);
+
+    let mut history_style = app.theme.footer_key_style;
+    if app.state == AppState::History {
+        history_style = history_style
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED);
+    }
+    let history_button = Paragraph::new(history_label).style(history_style);
+    f.render_widget(history_button, history_area);
+    app.history_button_rect = Some(history_area);
+}
+
 fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // Reuse existing button rendering (with mouse hitboxes), but position the bar
     // between the input and output panes per the new UI layout.
@@ -480,6 +551,19 @@ fn footer_buttons_for_state(app: &App) -> Vec<(FooterAction, String)> {
                     "DEBUG:OFF".to_string()
                 },
             ),
+            (FooterAction::Quit, "QUIT".to_string()),
+        ],
+        AppState::History => vec![
+            (FooterAction::ExecuteHistoryCommand, "RUN".to_string()),
+            (
+                FooterAction::ToggleHistoryPin,
+                if app.history_selected_is_pinned() {
+                    "UNPIN".to_string()
+                } else {
+                    "PIN".to_string()
+                },
+            ),
+            (FooterAction::CloseHistory, "BACK".to_string()),
             (FooterAction::Quit, "QUIT".to_string()),
         ],
         AppState::AwaitingConfirmation => vec![
@@ -594,6 +678,7 @@ fn output_title(app: &App) -> &'static str {
 
     match &app.state {
         AppState::Input => " SYSTEM STATUS & LOGS ",
+        AppState::History => " HISTORY ",
         AppState::Routing
         | AppState::Generating
         | AppState::Executing
@@ -616,6 +701,7 @@ fn build_output_lines<'a>(app: &'a App) -> Vec<Line<'a>> {
 
     match &app.state {
         AppState::Input => render_input_view(app, &app.theme),
+        AppState::History => render_history_view(app, &app.theme),
         AppState::Routing
         | AppState::Generating
         | AppState::Executing
@@ -735,6 +821,52 @@ fn render_input_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     text
 }
 
+fn render_history_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Command history sorted by pin and execution time.",
+            theme.header_subtitle_style,
+        )),
+        Line::from(Span::styled(
+            "Up/Down/PageUp/PageDown/Home/End: Move  X/Run: Execute  P: Pin/Unpin  Esc: Back",
+            theme.header_subtitle_style,
+        )),
+        Line::from(""),
+    ];
+
+    if app.history_items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(No command history)",
+            theme.header_subtitle_style,
+        )));
+        return lines;
+    }
+
+    let text_width = app.output_text_width.max(24) as usize;
+    for (idx, item) in app.history_items.iter().enumerate() {
+        let pin_label = if item.pinned_at.is_some() {
+            "[PIN]"
+        } else {
+            "[   ]"
+        };
+        let row = format!(
+            "{} {} [{}] {}",
+            pin_label, item.entry.timestamp, item.entry.plugin, item.entry.command
+        );
+        let clipped = truncate_with_ellipsis(&row, text_width);
+        let mut style = theme.header_subtitle_style;
+        if idx == app.history_selected {
+            style = style
+                .add_modifier(Modifier::REVERSED)
+                .add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(Span::styled(clipped, style)));
+    }
+
+    lines
+}
+
 fn render_clarify_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
     let mut lines = vec![Line::from("")];
     if let Some(payload) = &app.clarify {
@@ -770,6 +902,22 @@ fn render_clarify_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
         )));
     }
     lines
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let total = input.chars().count();
+    if total <= max_chars {
+        return input.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let keep = max_chars - 3;
+    let prefix: String = input.chars().take(keep).collect();
+    format!("{}...", prefix)
 }
 
 fn render_processing_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {

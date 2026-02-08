@@ -1,6 +1,6 @@
 pub use config::{Config, ModelRoute, ProviderAuth, ProviderConfig, ProviderKind};
 pub use context::{ContextScanner, FileContext};
-pub use executor::Executor;
+pub use executor::{Executor, HistoryEntry, PinnedHistoryEntry};
 pub use llm::{CachePolicy, LlmClient};
 pub use redaction::redact_sensitive_text;
 pub use router::Router;
