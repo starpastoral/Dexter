@@ -26,6 +26,9 @@ pub struct Theme {
     pub footer_text_style: Style,
     pub footer_highlight_style: Style,
     pub footer_key_style: Style,
+    pub footer_selected_style: Style,
+    // History
+    pub history_selected_style: Style,
     // Alerts/Errors
     pub error_style: Style,
     pub success_style: Style,
@@ -81,6 +84,14 @@ impl Theme {
             footer_text_style: Style::default().fg(amber_dim),
             footer_highlight_style: Style::default().fg(amber),
             footer_key_style: Style::default().fg(bg).bg(amber),
+            footer_selected_style: Style::default()
+                .fg(Color::Blue)
+                .bg(Color::Rgb(190, 190, 190))
+                .add_modifier(Modifier::BOLD),
+            history_selected_style: Style::default()
+                .fg(Color::Gray)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
 
             error_style: Style::default().fg(red_alert),
             success_style: Style::default().fg(bg).bg(amber),
@@ -119,6 +130,14 @@ impl Theme {
             footer_text_style: Style::default().fg(text_dim),
             footer_highlight_style: Style::default().fg(accent),
             footer_key_style: Style::default().fg(Color::White).bg(accent),
+            footer_selected_style: Style::default()
+                .fg(Color::Blue)
+                .bg(Color::Rgb(190, 190, 190))
+                .add_modifier(Modifier::BOLD),
+            history_selected_style: Style::default()
+                .fg(Color::Gray)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
 
             error_style: Style::default().fg(red_alert),
             success_style: Style::default().fg(Color::White).bg(accent),
@@ -157,6 +176,14 @@ impl Theme {
             footer_text_style: Style::default().fg(amber_dim),
             footer_highlight_style: Style::default().fg(amber),
             footer_key_style: Style::default().fg(bg).bg(amber),
+            footer_selected_style: Style::default()
+                .fg(Color::Blue)
+                .bg(Color::Rgb(190, 190, 190))
+                .add_modifier(Modifier::BOLD),
+            history_selected_style: Style::default()
+                .fg(Color::Gray)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
 
             error_style: Style::default().fg(red_alert),
             success_style: Style::default().fg(bg).bg(amber),

@@ -403,9 +403,7 @@ fn render_button_row(f: &mut Frame, app: &mut App, area: Rect) {
         render_button_bar(f, app, Rect { width: 0, ..area });
         let mut history_style = app.theme.footer_key_style;
         if app.state == AppState::History {
-            history_style = history_style
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED);
+            history_style = app.theme.footer_selected_style;
         }
         let history_button = Paragraph::new(history_label).style(history_style);
         f.render_widget(history_button, area);
@@ -431,9 +429,7 @@ fn render_button_row(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut history_style = app.theme.footer_key_style;
     if app.state == AppState::History {
-        history_style = history_style
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::UNDERLINED);
+        history_style = app.theme.footer_selected_style;
     }
     let history_button = Paragraph::new(history_label).style(history_style);
     f.render_widget(history_button, history_area);
@@ -504,9 +500,7 @@ fn render_button_bar(f: &mut Frame, app: &mut App, area: Rect) {
     for (i, rect) in button_rects.iter().enumerate() {
         let mut style = app.theme.footer_key_style;
         if app.focus == FocusArea::FooterButtons && app.footer_focus == i {
-            style = style
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED);
+            style = app.theme.footer_selected_style;
         }
 
         let text = display_texts.get(i).cloned().unwrap_or_default();
@@ -855,12 +849,11 @@ fn render_history_view<'a>(app: &'a App, theme: &Theme) -> Vec<Line<'a>> {
             pin_label, item.entry.timestamp, item.entry.plugin, item.entry.command
         );
         let clipped = truncate_with_ellipsis(&row, text_width);
-        let mut style = theme.header_subtitle_style;
-        if idx == app.history_selected {
-            style = style
-                .add_modifier(Modifier::REVERSED)
-                .add_modifier(Modifier::BOLD);
-        }
+        let style = if idx == app.history_selected {
+            theme.history_selected_style
+        } else {
+            theme.header_subtitle_style
+        };
         lines.push(Line::from(Span::styled(clipped, style)));
     }
 
